@@ -1,0 +1,210 @@
+/* Base styles */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-primary: #4B2E83;
+  --color-primary-light: #6E4BA5;
+  --color-primary-dark: #3A2266;
+  --color-secondary: #00A3E0;
+  --color-secondary-light: #33B5E6;
+  --color-secondary-dark: #0082B3;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background-color: #f5f7fa;
+  color: #333;
+}
+
+/* Layout components */
+.page-container {
+  padding: 1.5rem;
+}
+
+/* Card styles */
+.stat-card {
+  @apply bg-white rounded-lg shadow-md p-4 transition-all duration-300 hover:shadow-lg;
+}
+
+/* Button styles */
+.btn-primary {
+  @apply py-2 px-4 bg-primary text-white rounded-md hover:bg-primary-dark focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-50 transition-colors duration-300;
+}
+
+.btn-secondary {
+  @apply py-2 px-4 bg-white text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-secondary focus:ring-opacity-50 transition-colors duration-300;
+}
+
+.btn-danger {
+  @apply py-2 px-4 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition-colors duration-300;
+}
+
+/* Form styles */
+.input-field {
+  @apply px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-secondary focus:border-secondary transition-colors duration-300;
+}
+
+.form-label {
+  @apply block text-sm font-medium text-gray-700 mb-1;
+}
+
+/* Table styles */
+.data-table {
+  @apply min-w-full divide-y divide-gray-200;
+}
+
+.data-table thead {
+  @apply bg-gray-50;
+}
+
+.data-table th {
+  @apply px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider;
+}
+
+.data-table tbody {
+  @apply bg-white divide-y divide-gray-200;
+}
+
+.data-table td {
+  @apply px-6 py-4 whitespace-nowrap text-sm text-gray-500;
+}
+
+/* Animation */
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 1rem;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-primary-light);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary);
+}
+
+/* Navbar and sidebar styles */
+.navbar {
+  @apply bg-white shadow-md px-4 py-2 flex items-center justify-between;
+  height: 64px;
+}
+
+.sidebar {
+  @apply bg-primary text-white w-64 fixed h-full transition-all duration-300 ease-in-out;
+  z-index: 40;
+}
+
+.sidebar-link {
+  @apply flex items-center px-4 py-3 text-white hover:bg-primary-light transition-colors duration-200;
+}
+
+.sidebar-link.active {
+  @apply bg-primary-dark;
+}
+
+.sidebar-icon {
+  @apply mr-3;
+}
+
+/* Mobile menu */
+.mobile-menu-button {
+  @apply md:hidden p-2 rounded-md text-gray-600 hover:text-gray-900 hover:bg-gray-100 focus:outline-none focus:bg-gray-100 focus:text-gray-900;
+}
+
+/* Main content area */
+.main-content {
+  @apply ml-0 md:ml-64 transition-all duration-300 ease-in-out;
+  min-height: calc(100vh - 64px);
+}
+
+/* Dashboard specific styles */
+.dashboard-stats {
+  @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8;
+}
+
+/* Login page specific styles */
+.login-container {
+  @apply min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8;
+  background: linear-gradient(135deg, var(--color-primary-dark) 0%, var(--color-primary) 100%);
+}
+
+.login-card {
+  @apply bg-white rounded-lg shadow-xl overflow-hidden max-w-md w-full p-8;
+}
+
+.login-logo {
+  @apply mx-auto h-20 w-auto;
+}
+
+/* Toast notifications */
+.toast {
+  @apply fixed right-4 bottom-4 px-4 py-3 rounded-lg shadow-lg z-50 transform transition-all duration-300 ease-in-out;
+}
+
+.toast-success {
+  @apply bg-green-500 text-white;
+}
+
+.toast-error {
+  @apply bg-red-500 text-white;
+}
+
+.toast-info {
+  @apply bg-blue-500 text-white;
+}
+
+/* QR code container */
+.qr-container {
+  @apply bg-white p-6 rounded-lg shadow-md flex flex-col items-center justify-center;
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  
+  .print-only {
+    display: block !important;
+  }
+  
+  body {
+    background-color: white;
+  }
+  
+  .main-content {
+    margin-left: 0 !important;
+  }
+}
+
+select, select option {
+  color: #000 !important;
+}
