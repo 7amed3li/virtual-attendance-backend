@@ -7,7 +7,7 @@ module.exports = {
       description: "Üniversite QR kod yoklama sistemi için API dokümantasyonu"
     },
     servers: [
-      { url: "http://localhost:5000", description: "Local server" }
+      { url: "https://yzdd.gop.edu.tr:9090", description: "Local server" }
     ],
     components: {
       securitySchemes: {
