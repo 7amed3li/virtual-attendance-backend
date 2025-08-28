@@ -17,14 +17,45 @@ export default defineConfig({
       usePolling: true,
     },
     proxy: {
-      '/qr/api': 'http://localhost:9090'
+      '/qr/api': {
+        target: 'http://localhost:9090',
+        changeOrigin: true,
+        // FIX: Added underscores to unused variables
+        configure: (proxy, _options ) => {
+          proxy.on('proxyReq', (proxyReq, req, _res) => {
+            if (req.method === 'GET') {
+              proxyReq.removeHeader('Content-Type');
+            }
+          });
+        }
+      },
+      '/qr-admin/qr/api': {
+        target: 'http://localhost:9090',
+        changeOrigin: true,
+        rewrite: (path ) => path.replace(/^\/qr-admin/, ''),
+        // FIX: Added underscores to unused variables
+        configure: (proxy, _options) => {
+          proxy.on('proxyReq', (proxyReq, req, _res) => {
+            if (req.method === 'GET') {
+              proxyReq.removeHeader('Content-Type');
+            }
+          });
+        }
+      }
     }
   },
-  // Production alt yol
-  // base: '/qr-admin/',
+  preview: {
+    port: 9091,
+    host: true,
+    proxy: {
+      '/qr/api': 'http://localhost:9090',
+      '/qr-admin/qr/api': 'http://localhost:9090'
+    }
+  },
+  base: '/qr-admin/',
   build: {
     outDir: 'dist',
     sourcemap: true,
     chunkSizeWarningLimit: 1600,
   },
-});
+} );

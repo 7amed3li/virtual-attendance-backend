@@ -76,6 +76,7 @@ console.log("📦 Rotalar yükleniyor...");
 console.log("🔧 BASE_PATH:", BASE_PATH);
 console.log("🔧 JWT_SECRET:", process.env.JWT_SECRET ? "Tanımlı" : "Tanımsız");
 
+
 // Auth route'u en başta mount et
 app.use(`${BASE_PATH}/api`, require("./routes/auth"));
 console.log("✅ Auth route mounted at:", `${BASE_PATH}/api`);
