@@ -320,184 +320,217 @@ router.get(
     }
 );
 // Ana Panel için yeni route
+/**
+ * @swagger
+ * /api/dashboard:
+ *   get:
+ *     summary: Genel dashboard istatistiklerini getirir.
+ *     tags: [Raporlar]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Rapor için başlangıç tarihi (YYYY-MM-DD)
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Rapor için bitiş tarihi (YYYY-MM-DD)
+ *       - in: query
+ *         name: facultyId
+ *         schema:
+ *           type: integer
+ *         description: Fakülte ID'si
+ *     responses:
+ *       200:
+ *         description: Başarılı, dashboard verileri döndürülür.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalStudents:
+ *                   type: integer
+ *                 totalCourses:
+ *                   type: integer
+ *                 totalSessions:
+ *                   type: integer
+ *                 averageAttendance:
+ *                   type: number
+ *                 activeCourses:
+ *                   type: integer
+ *                 activeStudents:
+ *                   type: integer
+ *                 totalFaculties:
+ *                   type: integer
+ *                 facultyCourses:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       401:
+ *         description: Yetkilendirme hatası
+ *       500:
+ *         description: Sunucu hatası
+ */
 
-router.get('/dashboard', verifyToken, isAdmin, async (req, res) => {
-    try {
-        const { startDate, endDate, facultyId } = req.query;
-        let dateFilter = '';
-        let facultyFilter = '';
-        const queryParams = [];
-        let paramCounter = 1;
+router.get("/dashboard", verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { startDate, endDate, facultyId } = req.query;
 
-        // Fakülte filtresi
-        if (facultyId) {
-            facultyFilter = `AND f.id = $${paramCounter++}`;
-            queryParams.push(facultyId);
-        }
+    const buildFilters = (tableAlias) => {
+      let filterClause = "WHERE 1=1";
+      const params = [];
+      let paramCounter = 1;
 
-        // Oturumlar ve yoklamalar için tarih filtresi
-        if (startDate && endDate) {
-            dateFilter = `WHERE o.tarih BETWEEN $${paramCounter++} AND $${paramCounter++}`;
-            queryParams.push(startDate, endDate);
-        } else if (startDate) {
-            dateFilter = `WHERE o.tarih >= $${paramCounter++}`;
-            queryParams.push(startDate);
-        } else if (endDate) {
-            dateFilter = `WHERE o.tarih <= $${paramCounter++}`;
-            queryParams.push(endDate);
-        }
+      if (facultyId) {
+        filterClause += ` AND f.id = $${paramCounter++}`;
+        params.push(facultyId);
+      }
 
-        // Toplam öğrenci (kullanicilar sayfasıyla aynı sorgu kullan)
-        const studentCountQuery = facultyId 
-            ? `SELECT COUNT(DISTINCT k.id) FROM kullanicilar k 
-               JOIN ders_kayitlari dk ON k.id = dk.ogrenci_id 
-               JOIN dersler d ON dk.ders_id = d.id 
-               JOIN bolumler b ON d.bolum_id = b.id 
-               JOIN fakulteler f ON b.fakulte_id = f.id 
-               WHERE k.rol = 'ogrenci' AND k.hesap_durumu = 'aktif' ${facultyFilter}`
-            : `SELECT COUNT(*) FROM kullanicilar 
-               WHERE rol = 'ogrenci' AND hesap_durumu = 'aktif'`;
-        const studentCountResult = await pool.query(studentCountQuery, facultyId ? queryParams : []);
-        
-        // Toplam ders (fakülte filtresi ile)
-        const courseCountQuery = facultyId 
-            ? `SELECT COUNT(DISTINCT d.id) FROM dersler d 
-               JOIN bolumler b ON d.bolum_id = b.id 
-               JOIN fakulteler f ON b.fakulte_id = f.id 
-               WHERE 1=1 ${facultyFilter}`
-            : "SELECT COUNT(*) FROM dersler";
-        const courseCountResult = await pool.query(courseCountQuery, facultyId ? queryParams : []);
-        // Toplam oturum (tarih ve fakülte filtresiyle)
-        const sessionCountQuery = facultyId 
-            ? `SELECT COUNT(*) FROM oturumlar o 
-               JOIN dersler d ON o.ders_id = d.id 
-               JOIN bolumler b ON d.bolum_id = b.id 
-               JOIN fakulteler f ON b.fakulte_id = f.id 
-               ${dateFilter ? dateFilter.replace('WHERE', 'WHERE') : 'WHERE'} ${facultyFilter.replace('AND', '')}`
-            : `SELECT COUNT(*) FROM oturumlar o ${dateFilter}`;
-        const sessionCountResult = await pool.query(sessionCountQuery, facultyId ? queryParams : (dateFilter ? queryParams : []));
-        
-        // Ortalama yoklama oranı (tarih ve fakülte filtresiyle)
-        const attendanceRateQuery = facultyId 
-            ? `SELECT AVG(CASE WHEN y.durum = 'katildi' THEN 1 ELSE 0 END) * 100 as average_attendance
-               FROM yoklamalar y
-               JOIN oturumlar o ON y.oturum_id = o.id
-               JOIN dersler d ON o.ders_id = d.id
-               JOIN bolumler b ON d.bolum_id = b.id
-               JOIN fakulteler f ON b.fakulte_id = f.id
-               ${dateFilter ? dateFilter.replace('WHERE', 'WHERE') : 'WHERE'} ${facultyFilter.replace('AND', '')}`
-            : `SELECT AVG(CASE WHEN y.durum = 'katildi' THEN 1 ELSE 0 END) * 100 as average_attendance
-               FROM yoklamalar y
-               JOIN oturumlar o ON y.oturum_id = o.id
-               ${dateFilter}`;
-        const attendanceRateResult = await pool.query(attendanceRateQuery, facultyId ? queryParams : (dateFilter ? queryParams : []));
-        // Toplam fakülte
-        const facultyCountResult = await pool.query("SELECT COUNT(*) FROM fakulteler");
-        // Fakültelerde ders sayısı
-        const facultyCourseResult = await pool.query(
-            `SELECT f.id as fakulte_id, f.ad as fakulte_adi, COUNT(d.id) as ders_sayisi
-             FROM fakulteler f
-             LEFT JOIN bolumler b ON b.fakulte_id = f.id
-             LEFT JOIN dersler d ON d.bolum_id = b.id
-             GROUP BY f.id, f.ad`
-        );
+      if (startDate && endDate) {
+        filterClause += ` AND ${tableAlias}.tarih BETWEEN $${paramCounter++} AND $${paramCounter++}`;
+        params.push(startDate, endDate);
+      } else if (startDate) {
+        filterClause += ` AND ${tableAlias}.tarih >= $${paramCounter++}`;
+        params.push(startDate);
+      } else if (endDate) {
+        filterClause += ` AND ${tableAlias}.tarih <= $${paramCounter++}`;
+        params.push(endDate);
+      }
+      return { filterClause, params };
+    };
 
-        const totalStudents = parseInt(studentCountResult.rows[0].count, 10);
-        const totalCourses = parseInt(courseCountResult.rows[0].count, 10);
-        const totalSessions = parseInt(sessionCountResult.rows[0].count, 10);
-        const averageAttendance = attendanceRateResult.rows[0].average_attendance ? parseFloat(attendanceRateResult.rows[0].average_attendance) : 0;
-        const totalFaculties = parseInt(facultyCountResult.rows[0].count, 10);
-        const facultyCourses = facultyCourseResult.rows.map(row => ({
-            fakulte_id: row.fakulte_id,
-            fakulte_adi: row.fakulte_adi,
-            ders_sayisi: parseInt(row.ders_sayisi, 10)
-        }));
-
-        // interval frontend'den gelen saniye cinsinden aralık
-        const intervalSeconds = endDate && startDate ? Math.floor((new Date(endDate) - new Date(startDate)) / 1000) : 0;
-
-        // Aktif dersler (seçilen zaman aralığında oturum açılan ders sayısı)
-        let activeCoursesResult, activeStudentsResult;
-        if (intervalSeconds === 0) {
-            // Tüm zamanlar seçiliyse zaman filtresi olmadan sorgula
-            if (facultyId) {
-                activeCoursesResult = await pool.query(
-                    `SELECT COUNT(DISTINCT o.ders_id) as active_courses 
-                     FROM oturumlar o
-                     JOIN dersler d ON o.ders_id = d.id
-                     JOIN bolumler b ON d.bolum_id = b.id
-                     JOIN fakulteler f ON b.fakulte_id = f.id
-                     WHERE f.id = $1`,
-                    [facultyId]
-                );
-                activeStudentsResult = await pool.query(
-                    `SELECT COUNT(DISTINCT y.ogrenci_id) as active_students 
-                     FROM yoklamalar y
-                     JOIN oturumlar o ON y.oturum_id = o.id
-                     JOIN dersler d ON o.ders_id = d.id
-                     JOIN bolumler b ON d.bolum_id = b.id
-                     JOIN fakulteler f ON b.fakulte_id = f.id
-                     WHERE f.id = $1`,
-                    [facultyId]
-                );
-            } else {
-                activeCoursesResult = await pool.query(
-                    `SELECT COUNT(DISTINCT o.ders_id) as active_courses FROM oturumlar o`
-                );
-                activeStudentsResult = await pool.query(
-                    `SELECT COUNT(DISTINCT y.ogrenci_id) as active_students FROM yoklamalar y`
-                );
-            }
-        } else {
-            if (facultyId) {
-                activeCoursesResult = await pool.query(
-                    `SELECT COUNT(DISTINCT o.ders_id) as active_courses
-                     FROM oturumlar o
-                     JOIN dersler d ON o.ders_id = d.id
-                     JOIN bolumler b ON d.bolum_id = b.id
-                     JOIN fakulteler f ON b.fakulte_id = f.id
-                     WHERE f.id = $1 AND o.olusturma_tarihi >= NOW() - INTERVAL '${intervalSeconds} seconds'`,
-                    [facultyId]
-                );
-                activeStudentsResult = await pool.query(
-                    `SELECT COUNT(DISTINCT y.ogrenci_id) as active_students
-                     FROM yoklamalar y
-                     JOIN oturumlar o ON y.oturum_id = o.id
-                     JOIN dersler d ON o.ders_id = d.id
-                     JOIN bolumler b ON d.bolum_id = b.id
-                     JOIN fakulteler f ON b.fakulte_id = f.id
-                     WHERE f.id = $1 AND y.zaman >= NOW() - INTERVAL '${intervalSeconds} seconds'`,
-                    [facultyId]
-                );
-            } else {
-                activeCoursesResult = await pool.query(
-                    `SELECT COUNT(DISTINCT o.ders_id) as active_courses
-                     FROM oturumlar o
-                     WHERE o.olusturma_tarihi >= NOW() - INTERVAL '${intervalSeconds} seconds'`
-                );
-                activeStudentsResult = await pool.query(
-                    `SELECT COUNT(DISTINCT y.ogrenci_id) as active_students
-                     FROM yoklamalar y
-                     WHERE y.zaman >= NOW() - INTERVAL '${intervalSeconds} seconds'`
-                );
-            }
-        }
-
-        res.json({
-            totalStudents,
-            totalCourses,
-            totalSessions,
-            averageAttendance,
-            activeCourses: parseInt(activeCoursesResult.rows[0].active_courses, 10),
-            activeStudents: parseInt(activeStudentsResult.rows[0].active_students, 10),
-            totalFaculties,
-            facultyCourses
-        });
-
-    } catch (err) {
-        console.error('Error while generating dashboard stats:', err.message);
-        res.status(500).json({ message: 'Dashboard istatistikleri oluşturulurken bir sunucu hatası oluştu.' });
+    let studentCountQuery;
+    let studentCountParams = [];
+    if (facultyId) {
+      studentCountQuery = `
+        SELECT COUNT(DISTINCT k.id) 
+        FROM kullanicilar k 
+        JOIN ders_kayitlari dk ON k.id = dk.ogrenci_id 
+        JOIN dersler d ON dk.ders_id = d.id 
+        JOIN bolumler b ON d.bolum_id = b.id 
+        JOIN fakulteler f ON b.fakulte_id = f.id 
+        WHERE k.rol = 'ogrenci' AND k.hesap_durumu = 'aktif' AND f.id = $1`;
+      studentCountParams.push(facultyId);
+    } else {
+      studentCountQuery = `
+        SELECT COUNT(*) 
+        FROM kullanicilar 
+        WHERE rol = 'ogrenci' AND hesap_durumu = 'aktif'`;
     }
+    const studentCountResult = await pool.query(studentCountQuery, studentCountParams);
+
+    let courseCountQuery;
+    let courseCountParams = [];
+    if (facultyId) {
+      courseCountQuery = `
+        SELECT COUNT(DISTINCT d.id) 
+        FROM dersler d 
+        JOIN bolumler b ON d.bolum_id = b.id 
+        JOIN fakulteler f ON b.fakulte_id = f.id 
+        WHERE f.id = $1`;
+      courseCountParams.push(facultyId);
+    } else {
+      courseCountQuery = "SELECT COUNT(*) FROM dersler";
+    }
+    const courseCountResult = await pool.query(courseCountQuery, courseCountParams);
+
+    const sessionFilters = buildFilters("o");
+    const attendanceFilters = buildFilters("o");
+
+    const sessionCountQuery = `
+      SELECT COUNT(*) 
+      FROM oturumlar o 
+      LEFT JOIN dersler d ON o.ders_id = d.id 
+      LEFT JOIN bolumler b ON d.bolum_id = b.id 
+      LEFT JOIN fakulteler f ON b.fakulte_id = f.id 
+      ${sessionFilters.filterClause}`;
+    const sessionCountResult = await pool.query(sessionCountQuery, sessionFilters.params);
+
+    const attendanceRateQuery = `
+      SELECT AVG(CASE WHEN y.durum = 'katildi' THEN 1 ELSE 0 END) * 100 as average_attendance
+      FROM yoklamalar y
+      JOIN oturumlar o ON y.oturum_id = o.id
+      LEFT JOIN dersler d ON o.ders_id = d.id
+      LEFT JOIN bolumler b ON d.bolum_id = b.id
+      LEFT JOIN fakulteler f ON b.fakulte_id = f.id
+      ${attendanceFilters.filterClause}`;
+    const attendanceRateResult = await pool.query(attendanceRateQuery, attendanceFilters.params);
+
+    const facultyCountResult = await pool.query("SELECT COUNT(*) FROM fakulteler");
+
+    const facultyCourseResult = await pool.query(
+      `SELECT f.id as fakulte_id, f.ad as fakulte_adi, COUNT(d.id) as ders_sayisi
+       FROM fakulteler f
+       LEFT JOIN bolumler b ON b.fakulte_id = f.id
+       LEFT JOIN dersler d ON d.bolum_id = b.id
+       GROUP BY f.id, f.ad`
+    );
+
+    let activeCoursesResult, activeStudentsResult;
+    const intervalSeconds = endDate && startDate ? Math.floor((new Date(endDate) - new Date(startDate)) / 1000) : 86400;
+
+    let activeCoursesQuery = `
+      SELECT COUNT(DISTINCT o.ders_id) as active_courses
+      FROM oturumlar o
+      WHERE o.olusturma_tarihi >= NOW() - INTERVAL '${intervalSeconds} seconds'`;
+    let activeStudentsQuery = `
+      SELECT COUNT(DISTINCT y.ogrenci_id) as active_students
+      FROM yoklamalar y
+      WHERE y.zaman >= NOW() - INTERVAL '${intervalSeconds} seconds'`;
+
+    if (facultyId) {
+      activeCoursesQuery = `
+        SELECT COUNT(DISTINCT o.ders_id) as active_courses
+        FROM oturumlar o
+        JOIN dersler d ON o.ders_id = d.id
+        JOIN bolumler b ON d.bolum_id = b.id
+        JOIN fakulteler f ON b.fakulte_id = f.id
+        WHERE f.id = $1 AND o.olusturma_tarihi >= NOW() - INTERVAL '${intervalSeconds} seconds'`;
+      activeStudentsQuery = `
+        SELECT COUNT(DISTINCT y.ogrenci_id) as active_students
+        FROM yoklamalar y
+        JOIN oturumlar o ON y.oturum_id = o.id
+        JOIN dersler d ON o.ders_id = d.id
+        JOIN bolumler b ON d.bolum_id = b.id
+        JOIN fakulteler f ON b.fakulte_id = f.id
+        WHERE f.id = $1 AND y.zaman >= NOW() - INTERVAL '${intervalSeconds} seconds'`;
+    }
+
+    activeCoursesResult = await pool.query(activeCoursesQuery, facultyId ? [facultyId] : []);
+    activeStudentsResult = await pool.query(activeStudentsQuery, facultyId ? [facultyId] : []);
+
+    const totalStudents = parseInt(studentCountResult.rows[0].count, 10);
+    const totalCourses = parseInt(courseCountResult.rows[0].count, 10);
+    const totalSessions = parseInt(sessionCountResult.rows[0].count, 10);
+    const averageAttendance = attendanceRateResult.rows[0].average_attendance ? parseFloat(attendanceRateResult.rows[0].average_attendance) : 0;
+    const totalFaculties = parseInt(facultyCountResult.rows[0].count, 10);
+    const facultyCourses = facultyCourseResult.rows.map(row => ({
+      fakulte_id: row.fakulte_id,
+      fakulte_adi: row.fakulte_adi,
+      ders_sayisi: parseInt(row.ders_sayisi, 10)
+    }));
+
+    res.json({
+      totalStudents,
+      totalCourses,
+      totalSessions,
+      averageAttendance,
+      activeCourses: parseInt(activeCoursesResult.rows[0].active_courses, 10),
+      activeStudents: parseInt(activeStudentsResult.rows[0].active_students, 10),
+      totalFaculties,
+      facultyCourses
+    });
+
+  } catch (err) {
+    console.error('Error while generating dashboard stats:', err.message);
+    res.status(500).json({ message: 'Dashboard istatistikleri oluşturulurken bir sunucu hatası oluştu.' });
+  }
 });
 
 // Dashboard için yeni endpoint'ler

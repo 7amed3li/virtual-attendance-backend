@@ -222,4 +222,5 @@ router.get("/:id", sadeceAdmin, async (req, res, next) => {
     next(err);
   }
 });
+
 module.exports = router;

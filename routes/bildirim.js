@@ -407,36 +407,7 @@ router.get("/derslerim", verifyToken, async (req, res) => {
  *       500:
  *         description: Sunucu hatası.
  */
-// Bildirim silme işlemi (öğretmen kendi oluşturduğu bildirimi silebilir)
-router.delete("/sil/:bildirim_id", async (req, res) => {
-  const bildirimId = req.params.bildirim_id;
-  const authHeader = req.headers["authorization"];
-  const ogretmenId = req.params.kullanici_id;
-  const token = authHeader && authHeader.split(" ")[1];
 
-  if (!token) {
-    return res.status(401).json({ mesaj: "Yetkisiz: Token eksik." });
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    // Bildirim öğretmene mi ait kontrolü
-    const kontrol = await pool.query(
-      "SELECT * FROM bildirimler WHERE id = $1 AND kullanici_id = $2",
-      [bildirimId, ogretmenId]
-    );
-
-    if (kontrol.rows.length === 0) {
-      return res.status(403).json({ mesaj: "Bu bildirimi silme yetkiniz yok." });
-    }
-    // Silme işlemi
-    await pool.query("DELETE FROM bildirimler WHERE id = $1", [bildirimId]);
-    res.json({ mesaj: "Bildirim başarıyla silindi." });
-  } catch (err) {
-    console.error("Silme hatası:", err);
-    res.status(500).json({ mesaj: "Sunucu hatası." });
-  }
-});
 
 // Belirli bir kullanıcının bildirimlerini getir (admin panel için)
 router.get("/:userId", verifyToken, async (req, res) => {
