@@ -223,6 +223,4 @@ router.get("/:id", sadeceAdmin, async (req, res, next) => {
   }
 });
 
-
-
 module.exports = router;

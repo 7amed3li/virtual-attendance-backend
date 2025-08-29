@@ -19,6 +19,10 @@ app.use(cors({
     if (!origin || 
         origin.startsWith('http://localhost') || 
         origin.startsWith('http://192.168.56.1') ||
+
+        origin.startsWith('https://yzdd.gop.edu.tr') ||
+        origin.startsWith('http://yzdd.gop.edu.tr') ||
+
         origin.startsWith('http://127.0.0.1')) {
       callback(null, true);
     } else {
@@ -38,7 +42,9 @@ const swaggerOptions = require("./config/swaggerOptions");
 const specs = swaggerJsdoc(swaggerOptions);
 
 console.log("📝 Swagger dokümantasyonu ayarlanıyor...");
-app.use(`${BASE_PATH}api-docs`, swaggerUi.serve, swaggerUi.setup(specs));
+
+app.use(`${BASE_PATH}/api-docs`, swaggerUi.serve, swaggerUi.setup(specs));
+
 
 // Verify JWT middleware
 function verifyToken(req, res, next) {
