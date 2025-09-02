@@ -4,7 +4,7 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { router: qrRouter, KONUM_LISTESI } = require("./routes/qrCode");
 const ogrenciExcelRouter = require('./routes/ogrenciExcel');
-
+require('dotenv').config();
 
 const app = express();
 const PORT = 9090; // Sabit port
@@ -84,6 +84,7 @@ console.log("🔧 JWT_SECRET:", process.env.JWT_SECRET ? "Tanımlı" : "Tanıms�
 
 
 // Auth route'u en başta mount et
+
 app.use(`${BASE_PATH}/api`, require("./routes/auth"));
 console.log("✅ Auth route mounted at:", `${BASE_PATH}/api`);
 
