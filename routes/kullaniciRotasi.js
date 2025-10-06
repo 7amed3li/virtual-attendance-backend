@@ -1,808 +1,28 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../config/veritabani");
-const { query, param, body, validationResult } = require("express-validator");
-const { sadeceAdmin, sadeceOgretmenVeAdmin } = require("../middleware/yetkiKontrol");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const { body, param, validationResult } = require("express-validator");
 const verifyToken = require("../middleware/verifyToken");
-const logger = require('../utils/logger'); // إضافة استيراد logger
-
+const { sadeceAdmin } = require("../middleware/yetkiKontrol");
 const { PrismaClient } = require("@prisma/client"); // Prisma Client'ı import et
-const prisma = new PrismaClient();
-
-const isAdmin = (req, res, next) => {
-    logger.debug('🔍 Admin yetki kontrolü yapılıyor', { user_id: req.user?.id, rol: req.user?.rol });
-    if (req.user && req.user.rol === "admin") {
-        logger.debug('Kullanıcı admin, erişim izni verildi', { user_id: req.user?.id });
-        next();
-    } else {
-        logger.warn('❌ Yetkisiz erişim: Admin yetkisi gerekiyor', { user_id: req.user?.id, rol: req.user?.rol });
-        res.status(403).json({ mesaj: "Bu işlem için yetkiniz yok. Sadece adminler bu raporları görebilir." });
-    }
-};
+const prisma = new PrismaClient(); 
+const logger = require('../utils/logger');
 
 /**
  * @swagger
  * tags:
- *   name: Raporlar
- *   description: Genel yoklama raporları ve istatistikleri
+ *   name: Auth
+ *   description: Kullanıcı kimlik doğrulama, profil ve şifre yönetimi işlemleri
  */
 
 /**
  * @swagger
- * /api/reports/university:
- *   get:
- *     summary: Üniversite genelinde yoklama istatistiklerini getirir.
- *     tags: [Raporlar]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: startDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Rapor için başlangıç tarihi (YYYY-MM-DD).
- *       - in: query
- *         name: endDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Rapor için bitiş tarihi (YYYY-MM-DD).
- *     responses:
- *       200:
- *         description: Üniversite geneli yoklama istatistikleri.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 total_katilim_orani:
- *                   type: number
- *                   format: float
- *                 fakulte_bazli_oranlar:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       fakulte_id:
- *                         type: integer
- *                       fakulte_adi:
- *                         type: string
- *                       katilim_orani:
- *                         type: number
- *                         format: float
- *       400:
- *         description: Geçersiz tarih formatı.
- *       403:
- *         description: Yetkisiz erişim.
- *       500:
- *         description: Sunucu hatası.
- */
-router.get(
-    "/university",
-    isAdmin,
-    [
-        query("startDate").optional().isISO8601().toDate().withMessage("Başlangıç tarihi YYYY-MM-DD formatında olmalıdır."),
-        query("endDate").optional().isISO8601().toDate().withMessage("Bitiş tarihi YYYY-MM-DD formatında olmalıdır.")
-    ],
-    async (req, res, next) => {
-        logger.debug('🔍 Üniversite genel rapor isteği alındı', { start_date: req.query.startDate, end_date: req.query.endDate, user_id: req.user?.id });
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-            logger.warn('❌ Doğrulama hatası', { errors: errors.array(), start_date: req.query.startDate, end_date: req.query.endDate, user_id: req.user?.id });
-            return res.status(400).json({ hatalar: errors.array() });
-        }
-
-        const { startDate, endDate } = req.query;
-        let dateFilter = "";
-        const queryParams = [];
-
-        if (startDate && endDate) {
-            dateFilter = "AND o.tarih BETWEEN $1 AND $2";
-            queryParams.push(startDate, endDate);
-        } else if (startDate) {
-            dateFilter = "AND o.tarih >= $1";
-            queryParams.push(startDate);
-        } else if (endDate) {
-            dateFilter = "AND o.tarih <= $1";
-            queryParams.push(endDate);
-        }
-
-        try {
-            logger.debug('Genel katılım oranı hesaplanıyor', { start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            // Genel katılım oranı
-            const genelOranQuery = `
-                    WITH SessionAttendance AS (
-                        SELECT
-                            o.id AS oturum_id,
-                            o.ders_id,
-                            -- عدد الحضور الفعلي في كل جلسة
-                            COUNT(y.id) FILTER (WHERE y.durum IN ('katildi', 'gec_geldi')) AS attended_count,
-                            -- العدد الإجمالي للطلاب المسجلين في المادة لهذه الجلسة
-                            (SELECT COUNT(dk.ogrenci_id) FROM ders_kayitlari dk WHERE dk.ders_id = o.ders_id) AS total_registered
-                        FROM oturumlar o
-                        LEFT JOIN yoklamalar y ON o.id = y.oturum_id
-                        WHERE 1=1 ${dateFilter} -- تطبيق فلاتر التاريخ هنا
-                        GROUP BY o.id, o.ders_id
-                    )
-                    SELECT
-                        -- حساب متوسط النسب المئوية لجميع الجلسات
-                        AVG(CASE
-                            WHEN sa.total_registered > 0 THEN (sa.attended_count::FLOAT * 100.0 / sa.total_registered::FLOAT)
-                            ELSE 0
-                        END) AS genel_katilim_orani
-                    FROM SessionAttendance sa;
-                `;
-            const genelOranResult = await pool.query(genelOranQuery, queryParams);
-            const genel_katilim_orani = genelOranResult.rows[0]?.genel_katilim_orani || 0;
-
-            logger.debug('Toplam öğrenci sayısı hesaplanıyor', { user_id: req.user?.id });
-            // Toplam öğrenci sayısını çek
-            const totalStudentsQuery = `
-              SELECT COUNT(*) AS toplam_ogrenciler
-              FROM kullanicilar 
-              WHERE rol = 'ogrenci';
-            `;
-            const totalStudentsResult = await pool.query(totalStudentsQuery);
-            const total_ogrenciler = parseInt(totalStudentsResult.rows[0]?.toplam_ogrenciler || 0);
-
-            logger.debug('Toplam ders sayısı hesaplanıyor', { user_id: req.user?.id });
-            // Toplam ders sayısını çek
-            const totalCoursesQuery = `
-              SELECT COUNT(*) AS toplam_dersler
-              FROM dersler;
-            `;
-            const totalCoursesResult = await pool.query(totalCoursesQuery);
-            const total_dersler = parseInt(totalCoursesResult.rows[0]?.toplam_dersler || 0);
-
-            logger.debug('Fakülte bazlı oranlar hesaplanıyor', { start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            // Tüm fakülteleri göster
-           const fakulteBazliQuery = `
-            SELECT
-                f.id AS fakulte_id,
-                f.ad AS fakulte_adi,
-                COALESCE(
-                    (CAST(SUM(CASE WHEN y.durum IN ('katildi', 'gec_geldi') THEN 1 ELSE 0 END) AS FLOAT) * 100.0) /
-                    NULLIF(CAST(COUNT(DISTINCT dk.ogrenci_id) AS FLOAT) * CAST(COUNT(DISTINCT o.id) AS FLOAT), 0),
-                0) AS katilim_orani
-            FROM fakulteler f
-            LEFT JOIN bolumler b ON b.fakulte_id = f.id
-            LEFT JOIN dersler d ON d.bolum_id = b.id
-            LEFT JOIN ders_kayitlari dk ON dk.ders_id = d.id
-            LEFT JOIN oturumlar o ON o.ders_id = d.id ${dateFilter.replace('AND o.tarih', 'AND o.tarih')}
-            LEFT JOIN yoklamalar y ON y.oturum_id = o.id AND y.ogrenci_id = dk.ogrenci_id
-            GROUP BY f.id, f.ad
-            ORDER BY f.ad;
-            `;
-            const fakulteBazliResult = await pool.query(fakulteBazliQuery, queryParams);
-
-            logger.info('✅ Üniversite genel raporu başarıyla oluşturuldu', { total_katilim_orani: genel_katilim_orani, fakulte_sayisi: fakulteBazliResult.rows.length, user_id: req.user?.id });
-            res.status(200).json({
-                total_katilim_orani: parseFloat(genel_katilim_orani.toFixed(2)),
-                total_ogrenciler,
-                total_dersler,
-                total_fakulteler: fakulteBazliResult.rows.length,
-                fakulte_bazli_oranlar: fakulteBazliResult.rows.map(row => ({
-                    ...row,
-                    katilim_orani: parseFloat(row.katilim_orani.toFixed(2))
-                }))
-            });
-        } catch (err) {
-            console.error("Üniversite raporu hatası:", err);
-            logger.error('❌ Üniversite raporu hatası', { error: err.message, stack: err.stack, start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            next(err);
-        }
-    }
-);
-
-/**
- * @swagger
- * /api/reports/faculty/{facultyId}:
- *   get:
- *     summary: Belirli bir fakültenin yoklama istatistiklerini getirir.
- *     tags: [Raporlar]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: facultyId
- *         required: true
- *         schema:
- *           type: integer
- *         description: Fakülte IDsi.
- *       - in: query
- *         name: startDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Rapor için başlangıç tarihi (YYYY-MM-DD).
- *       - in: query
- *         name: endDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Rapor için bitiş tarihi (YYYY-MM-DD).
- *     responses:
- *       200:
- *         description: Fakülte yoklama istatistikleri.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 fakulte_adi:
- *                   type: string
- *                 total_katilim_orani:
- *                   type: number
- *                   format: float
- *                 bolum_bazli_oranlar:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       bolum_id:
- *                         type: integer
- *                       bolum_adi:
- *                         type: string
- *                       katilim_orani:
- *                         type: number
- *                         format: float
- *       400:
- *         description: Geçersiz ID veya tarih formatı.
- *       403:
- *         description: Yetkisiz erişim.
- *       404:
- *         description: Fakülte bulunamadı.
- *       500:
- *         description: Sunucu hatası.
- */
-router.get(
-    "/faculty/:facultyId",
-    isAdmin,
-    [
-        param("facultyId").isInt({ gt: 0 }).withMessage("Fakülte ID geçerli bir tamsayı olmalıdır."),
-        query("startDate").optional().isISO8601().toDate().withMessage("Başlangıç tarihi YYYY-MM-DD formatında olmalıdır."),
-        query("endDate").optional().isISO8601().toDate().withMessage("Bitiş tarihi YYYY-MM-DD formatında olmalıdır.")
-    ],
-    async (req, res, next) => {
-        logger.debug('🔍 Fakülte raporu isteği alındı', { faculty_id: req.params.facultyId, start_date: req.query.startDate, end_date: req.query.endDate, user_id: req.user?.id });
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-            logger.warn('❌ Doğrulama hatası', { errors: errors.array(), faculty_id: req.params.facultyId, user_id: req.user?.id });
-            return res.status(400).json({ hatalar: errors.array() });
-        }
-
-        const { facultyId } = req.params;
-        const { startDate, endDate } = req.query;
-        let dateFilter = "";
-        const queryParams = [facultyId];
-        let paramCounter = 2;
-
-        if (startDate && endDate) {
-            dateFilter = `AND o.tarih BETWEEN $${paramCounter++} AND $${paramCounter++}`;
-            queryParams.push(startDate, endDate);
-        } else if (startDate) {
-            dateFilter = `AND o.tarih >= $${paramCounter++}`;
-            queryParams.push(startDate);
-        } else if (endDate) {
-            dateFilter = `AND o.tarih <= $${paramCounter++}`;
-            queryParams.push(endDate);
-        }
-
-        try {
-            logger.debug('Fakülte varlığı kontrol ediliyor', { faculty_id: facultyId, user_id: req.user?.id });
-            const fakulteCheck = await pool.query("SELECT ad FROM fakulteler WHERE id = $1", [facultyId]);
-            if (fakulteCheck.rows.length === 0) {
-                logger.warn('❌ Fakülte bulunamadı', { faculty_id: facultyId, user_id: req.user?.id });
-                return res.status(404).json({ mesaj: "Fakülte bulunamadı." });
-            }
-            const fakulte_adi = fakulteCheck.rows[0].ad;
-
-            logger.debug('Genel katılım oranı hesaplanıyor', { faculty_id: facultyId, start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            const genelOranQuery = `
-                SELECT 
-                    CAST(SUM(CASE WHEN y.durum = 'katildi' OR y.durum = 'gec_geldi' THEN 1 ELSE 0 END) AS FLOAT) * 100.0 /
-                    NULLIF(COUNT(y.id), 0) AS genel_katilim_orani
-                FROM yoklamalar y
-                JOIN oturumlar o ON y.oturum_id = o.id
-                JOIN dersler d ON o.ders_id = d.id
-                JOIN bolumler b ON d.bolum_id = b.id
-                WHERE b.fakulte_id = $1 ${dateFilter};
-            `;
-            const genelOranResult = await pool.query(genelOranQuery, queryParams);
-            const genel_katilim_orani = genelOranResult.rows[0]?.genel_katilim_orani || 0;
-
-            logger.debug('Bölüm bazlı oranlar hesaplanıyor', { faculty_id: facultyId, start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            const bolumBazliQuery = `
-            SELECT
-                b.id AS bolum_id,
-                b.ad AS bolum_adi,
-                COALESCE(
-                    (CAST(SUM(CASE WHEN y.durum IN ('katildi', 'gec_geldi') THEN 1 ELSE 0 END) AS FLOAT) * 100.0) /
-                    NULLIF(CAST(COUNT(DISTINCT dk.ogrenci_id) AS FLOAT) * CAST(COUNT(DISTINCT o.id) AS FLOAT), 0),
-                0) AS katilim_orani
-            FROM bolumler b
-            LEFT JOIN dersler d ON d.bolum_id = b.id
-            LEFT JOIN ders_kayitlari dk ON dk.ders_id = d.id
-            LEFT JOIN oturumlar o ON o.ders_id = d.id ${dateFilter.replace('AND o.tarih', 'AND o.tarih')}
-            LEFT JOIN yoklamalar y ON y.oturum_id = o.id AND y.ogrenci_id = dk.ogrenci_id
-            WHERE b.fakulte_id = $1
-            GROUP BY b.id, b.ad
-            ORDER BY b.ad;
-            `;
-
-
-            const bolumBazliResult = await pool.query(bolumBazliQuery, queryParams);
-
-            logger.info('✅ Fakülte raporu başarıyla oluşturuldu', { faculty_id: facultyId, fakulte_adi, bolum_sayisi: bolumBazliResult.rows.length, user_id: req.user?.id });
-            res.status(200).json({
-                fakulte_adi,
-                total_katilim_orani: parseFloat(genel_katilim_orani.toFixed(2)),
-                bolum_bazli_oranlar: bolumBazliResult.rows.map(row => ({
-                    ...row,
-                    katilim_orani: parseFloat(row.katilim_orani.toFixed(2))
-                }))
-            });
-        } catch (err) {
-            console.error(`Fakülte ${facultyId} raporu hatası:`, err);
-            logger.error('❌ Fakülte raporu hatası', { error: err.message, stack: err.stack, faculty_id: facultyId, start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            next(err);
-        }
-    }
-);
-
-// Ana Panel için yeni route
-/**
- * @swagger
- * /api/dashboard:
- *   get:
- *     summary: Genel dashboard istatistiklerini getirir.
- *     tags: [Raporlar]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: startDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Rapor için başlangıç tarihi (YYYY-MM-DD)
- *       - in: query
- *         name: endDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Rapor için bitiş tarihi (YYYY-MM-DD)
- *       - in: query
- *         name: facultyId
- *         schema:
- *           type: integer
- *         description: Fakülte ID'si
- *     responses:
- *       200:
- *         description: Başarılı, dashboard verileri döndürülür.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 totalStudents:
- *                   type: integer
- *                 totalCourses:
- *                   type: integer
- *                 totalSessions:
- *                   type: integer
- *                 averageAttendance:
- *                   type: number
- *                 activeCourses:
- *                   type: integer
- *                 activeStudents:
- *                   type: integer
- *                 totalFaculties:
- *                   type: integer
- *                 facultyCourses:
- *                   type: array
- *                   items:
- *                     type: object
- *       401:
- *         description: Yetkilendirme hatası
- *       500:
- *         description: Sunucu hatası
- */
-router.get("/dashboard", verifyToken, isAdmin, async (req, res) => {
-    logger.debug('🔍 Dashboard istatistik isteği alındı', { query: req.query, user_id: req.user?.id });
-    try {
-        const { startDate, endDate, facultyId } = req.query;
-
-        // --- 1. بناء جملة WHERE والـ Parameters بشكل ديناميكي ---
-        const whereClauses = [];
-        const queryParams = [];
-        let paramIndex = 1;
-
-        if (facultyId) {
-            whereClauses.push(`f.id = $${paramIndex++}`);
-            queryParams.push(facultyId);
-        }
-        if (startDate) {
-            // نستخدم ::date للتأكد من أننا نقارن التواريخ فقط
-            whereClauses.push(`o.tarih::date >= $${paramIndex++}`);
-            queryParams.push(startDate);
-        }
-        if (endDate) {
-            whereClauses.push(`o.tarih::date <= $${paramIndex++}`);
-            queryParams.push(endDate);
-        }
-
-        const mainWhereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
-        // --- 2. تنفيذ جميع الاستعلامات بشكل متوازٍ لتحسين الأداء ---
-        const [
-            studentCountResult,
-            courseCountResult,
-            sessionCountResult,
-            attendanceRateResult,
-            facultyCountResult,
-            facultyCourseResult,
-            activeStudentsResult,
-            activeCoursesResult
-        ] = await Promise.all([
-            // إجمالي الطلاب (لا يتأثر بالفلاتر)
-            pool.query(`SELECT COUNT(*) as count FROM kullanicilar WHERE rol = 'ogrenci' AND hesap_durumu = 'aktif'`),
-            // إجمالي المواد (لا يتأثر بالفلاتر)
-            pool.query(`SELECT COUNT(*) as count FROM dersler`),
-            // إجمالي الجلسات (يتأثر بالفلاتر)
-            pool.query(`SELECT COUNT(DISTINCT o.id) as count FROM oturumlar o LEFT JOIN dersler d ON o.ders_id = d.id LEFT JOIN bolumler b ON d.bolum_id = b.id LEFT JOIN fakulteler f ON b.fakulte_id = f.id ${mainWhereClause}`, queryParams),
-            // متوسط الحضور (يتأثر بالفلاتر)
-            pool.query(`
-                WITH SessionAttendance AS (
-                    SELECT
-                        o.id AS oturum_id,
-                        (COUNT(y.id) FILTER (WHERE y.durum IN ('katildi', 'gec_geldi')))::FLOAT AS attended_count,
-                        (SELECT COUNT(dk.ogrenci_id) FROM ders_kayitlari dk WHERE dk.ders_id = o.ders_id)::FLOAT AS total_registered
-                    FROM oturumlar o
-                    LEFT JOIN yoklamalar y ON o.id = y.oturum_id
-                    LEFT JOIN dersler d ON o.ders_id = d.id
-                    LEFT JOIN bolumler b ON d.bolum_id = b.id
-                    LEFT JOIN fakulteler f ON b.fakulte_id = f.id
-                    ${mainWhereClause}
-                    GROUP BY o.id
-                )
-                SELECT AVG(CASE WHEN total_registered > 0 THEN (attended_count * 100.0 / total_registered) ELSE 0 END) as average_attendance
-                FROM SessionAttendance
-            `, queryParams),
-            // إجمالي الكليات (لا يتأثر بالفلاتر)
-            pool.query(`SELECT COUNT(*) as count FROM fakulteler`),
-            // عدد المواد لكل كلية (لا يتأثر بالفلاتر)
-            pool.query(`SELECT f.id as fakulte_id, f.ad as fakulte_adi, COUNT(d.id) as ders_sayisi FROM fakulteler f LEFT JOIN bolumler b ON b.fakulte_id = f.id LEFT JOIN dersler d ON d.bolum_id = b.id GROUP BY f.id, f.ad`),
-            // الطلاب النشطون (يتأثر بالفلاتر)
-            pool.query(`SELECT COUNT(DISTINCT y.ogrenci_id) as active_students FROM yoklamalar y JOIN oturumlar o ON y.oturum_id = o.id JOIN dersler d ON o.ders_id = d.id JOIN bolumler b ON d.bolum_id = b.id JOIN fakulteler f ON b.fakulte_id = f.id ${mainWhereClause.replace(/o\.tarih/g, 'y.zaman')}`, queryParams),
-            // المواد النشطة (يتأثر بالفلاتر)
-            pool.query(`SELECT COUNT(DISTINCT o.ders_id) as active_courses FROM oturumlar o JOIN dersler d ON o.ders_id = d.id JOIN bolumler b ON d.bolum_id = b.id JOIN fakulteler f ON b.fakulte_id = f.id ${mainWhereClause}`, queryParams)
-        ]);
-
-        // --- 3. تجميع النتائج وإرسالها ---
-        const responseData = {
-            totalStudents: parseInt(studentCountResult.rows[0].count, 10) || 0,
-            totalCourses: parseInt(courseCountResult.rows[0].count, 10) || 0,
-            totalSessions: parseInt(sessionCountResult.rows[0].count, 10) || 0,
-            averageAttendance: parseFloat(attendanceRateResult.rows[0].average_attendance || 0).toFixed(2),
-            totalFaculties: parseInt(facultyCountResult.rows[0].count, 10) || 0,
-            facultyCourses: facultyCourseResult.rows.map(row => ({
-                fakulte_id: row.fakulte_id,
-                fakulte_adi: row.fakulte_adi,
-                ders_sayisi: parseInt(row.ders_sayisi, 10)
-            })),
-            activeStudents: parseInt(activeStudentsResult.rows[0].active_students, 10) || 0,
-            activeCourses: parseInt(activeCoursesResult.rows[0].active_courses, 10) || 0,
-        };
-
-        logger.info('✅ Dashboard istatistikleri başarıyla oluşturuldu', { user_id: req.user?.id, stats: responseData });
-        res.json(responseData);
-
-    } catch (err) {
-        console.error('Error while generating dashboard stats:', err.message, err.stack);
-        logger.error('❌ Dashboard istatistik hatası', { error: err.message, stack: err.stack, query: req.query, user_id: req.user?.id });
-        res.status(500).json({ message: 'Dashboard istatistikleri oluşturulurken bir sunucu hatası oluştu.' });
-    }
-});
-
-
-// Son aktiviteleri getir (son oturumlar + yoklamalar)
-router.get('/recent-activities', verifyToken, isAdmin, async (req, res) => {
-    logger.debug('🔍 Son aktiviteler isteği alındı', { limit: req.query.limit, user_id: req.user?.id });
-    try {
-        const limit = parseInt(req.query.limit) || 10;
-
-        logger.debug('Son oturumlar çekiliyor', { limit, user_id: req.user?.id });
-        // Son oturumları çek
-        const recentSessionsQuery = `
-            SELECT 
-                o.id,
-                o.tarih,
-                o.saat,
-                o.konu,
-                d.ad as ders_adi,
-                k.ad as ogretmen_adi,
-                k.soyad as ogretmen_soyadi,
-                COUNT(y.id) as katilim_sayisi,
-                'session' as type
-            FROM oturumlar o
-            LEFT JOIN dersler d ON o.ders_id = d.id
-            LEFT JOIN kullanicilar k ON d.ogretmen_id = k.id
-            LEFT JOIN yoklamalar y ON o.id = y.oturum_id AND y.durum = 'katildi'
-            WHERE o.tarih >= CURRENT_DATE - INTERVAL '7 days'
-            GROUP BY o.id, d.ad, k.ad, k.soyad
-            ORDER BY o.tarih DESC, o.saat DESC
-            LIMIT $1`;
-        const sessionsResult = await pool.query(recentSessionsQuery, [limit]);
-
-        logger.debug('Son yoklamalar çekiliyor', { limit, user_id: req.user?.id });
-        // Son yoklamaları çek
-        const recentAttendanceQuery = `
-            SELECT 
-                y.id,
-                y.zaman,
-                y.durum,
-                k.ad as ogrenci_adi,
-                k.soyad as ogrenci_soyadi,
-                d.ad as ders_adi,
-                'attendance' as type
-            FROM yoklamalar y
-            LEFT JOIN kullanicilar k ON y.ogrenci_id = k.id
-            LEFT JOIN oturumlar o ON y.oturum_id = o.id
-            LEFT JOIN dersler d ON o.ders_id = d.id
-            WHERE y.zaman >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
-            ORDER BY y.zaman DESC
-            LIMIT $1`;
-        const attendanceResult = await pool.query(recentAttendanceQuery, [limit]);
-
-        logger.info('✅ Son aktiviteler başarıyla alındı', { session_count: sessionsResult.rows.length, attendance_count: attendanceResult.rows.length, user_id: req.user?.id });
-        res.json({
-            sessions: sessionsResult.rows,
-            attendance: attendanceResult.rows
-        });
-    } catch (err) {
-        console.error('Recent activities hatası:', err.message);
-        logger.error('❌ Son aktiviteler hatası', { error: err.message, stack: err.stack, limit: req.query.limit, user_id: req.user?.id });
-        res.status(500).json({ message: 'Recent activities alınırken hata oluştu.' });
-    }
-});
-
-// Düşük katılımlı dersleri getir
-router.get('/low-attendance-courses', verifyToken, isAdmin, async (req, res) => {
-    logger.debug('🔍 Düşük katılımlı dersler isteği alındı', { limit: req.query.limit, threshold: req.query.threshold, user_id: req.user?.id });
-    try {
-        const limit = parseInt(req.query.limit) || 5;
-        const threshold = parseInt(req.query.threshold) || 50; // %50'nin altı
-
-        const query = `
-            WITH ders_istatistikleri AS (
-                SELECT 
-                    d.id,
-                    d.ad as ders_adi,
-                    k.ad as ogretmen_adi,
-                    k.soyad as ogretmen_soyadi,
-                    COUNT(DISTINCT o.id) as toplam_oturum,
-                    COUNT(DISTINCT dk.ogrenci_id) as toplam_ogrenci,
-                    COUNT(CASE WHEN y.durum = 'katildi' THEN 1 END) as toplam_katilim,
-                    CASE 
-                        WHEN COUNT(DISTINCT o.id) > 0 AND COUNT(DISTINCT dk.ogrenci_id) > 0 
-                        THEN ROUND(
-                            (COUNT(CASE WHEN y.durum = 'katildi' THEN 1 END)::decimal / 
-                            (COUNT(DISTINCT o.id) * COUNT(DISTINCT dk.ogrenci_id))) * 100, 2
-                        )
-                        ELSE 0 
-                    END as katilim_orani
-                FROM dersler d
-                LEFT JOIN kullanicilar k ON d.ogretmen_id = k.id
-                LEFT JOIN oturumlar o ON d.id = o.ders_id
-                LEFT JOIN ders_kayitlari dk ON d.id = dk.ders_id
-                LEFT JOIN yoklamalar y ON o.id = y.oturum_id AND y.ogrenci_id = dk.ogrenci_id
-                WHERE o.tarih >= CURRENT_DATE - INTERVAL '30 days'
-                GROUP BY d.id, d.ad, k.ad, k.soyad
-                HAVING COUNT(DISTINCT o.id) > 0
-            )
-            SELECT * FROM ders_istatistikleri 
-            WHERE katilim_orani < $1
-            ORDER BY katilim_orani ASC
-            LIMIT $2`;
-        const result = await pool.query(query, [threshold, limit]);
-
-        logger.info('✅ Düşük katılımlı dersler başarıyla alındı', { course_count: result.rows.length, threshold, limit, user_id: req.user?.id });
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Low attendance courses hatası:', err.message);
-        logger.error('❌ Düşük katılımlı dersler hatası', { error: err.message, stack: err.stack, limit: req.query.limit, threshold: req.query.threshold, user_id: req.user?.id });
-        res.status(500).json({ message: 'Düşük katılımlı dersler alınırken hata oluştu.' });
-    }
-});
-
-// En performanslı dersleri getir
-router.get('/top-performing-courses', verifyToken, isAdmin, async (req, res) => {
-    logger.debug('🔍 En performanslı dersler isteği alındı', { limit: req.query.limit, threshold: req.query.threshold, user_id: req.user?.id });
-    try {
-        const limit = parseInt(req.query.limit) || 5;
-        const threshold = parseInt(req.query.threshold) || 75; // %75'in üstü
-
-        const query = `
-            WITH ders_istatistikleri AS (
-                SELECT 
-                    d.id,
-                    d.ad as ders_adi,
-                    k.ad as ogretmen_adi,
-                    k.soyad as ogretmen_soyadi,
-                    COUNT(DISTINCT o.id) as toplam_oturum,
-                    COUNT(DISTINCT dk.ogrenci_id) as toplam_ogrenci,
-                    COUNT(CASE WHEN y.durum = 'katildi' THEN 1 END) as toplam_katilim,
-                    CASE 
-                        WHEN COUNT(DISTINCT o.id) > 0 AND COUNT(DISTINCT dk.ogrenci_id) > 0 
-                        THEN ROUND(
-                            (COUNT(CASE WHEN y.durum = 'katildi' THEN 1 END)::decimal / 
-                            (COUNT(DISTINCT o.id) * COUNT(DISTINCT dk.ogrenci_id))) * 100, 2
-                        )
-                        ELSE 0 
-                    END as katilim_orani
-                FROM dersler d
-                LEFT JOIN kullanicilar k ON d.ogretmen_id = k.id
-                LEFT JOIN oturumlar o ON d.id = o.ders_id
-                LEFT JOIN ders_kayitlari dk ON d.id = dk.ders_id
-                LEFT JOIN yoklamalar y ON o.id = y.oturum_id AND y.ogrenci_id = dk.ogrenci_id
-                WHERE o.tarih >= CURRENT_DATE - INTERVAL '30 days'
-                GROUP BY d.id, d.ad, k.ad, k.soyad
-                HAVING COUNT(DISTINCT o.id) > 0
-            )
-            SELECT * FROM ders_istatistikleri 
-            WHERE katilim_orani >= $1
-            ORDER BY katilim_orani DESC
-            LIMIT $2`;
-        const result = await pool.query(query, [threshold, limit]);
-
-        logger.info('✅ En performanslı dersler başarıyla alındı', { course_count: result.rows.length, threshold, limit, user_id: req.user?.id });
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Top performing courses hatası:', err.message);
-        logger.error('❌ En performanslı dersler hatası', { error: err.message, stack: err.stack, limit: req.query.limit, threshold: req.query.threshold, user_id: req.user?.id });
-        res.status(500).json({ message: 'En performanslı dersler alınırken hata oluştu.' });
-    }
-});
-
-/**
- * @swagger
- * /api/reports/department/{departmentId}:
- *   get:
- *     summary: Belirli bir bölümün ders bazlı yoklama istatistiklerini getirir.
- *     tags: [Raporlar]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: departmentId
- *         required: true
- *         schema:
- *           type: integer
- *         description: Bölüm ID'si.
- *       - in: query
- *         name: startDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Başlangıç tarihi (YYYY-MM-DD).
- *       - in: query
- *         name: endDate
- *         schema:
- *           type: string
- *           format: date
- *         description: Bitiş tarihi (YYYY-MM-DD).
- *     responses:
- *       200:
- *         description: Ders bazlı yoklama verileri.
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 type: object
- *                 properties:
- *                   ders_id:
- *                     type: integer
- *                   ders_adi:
- *                     type: string
- *                   toplam_yoklama:
- *                     type: integer
- *                   katilim_orani:
- *                     type: number
- *                     format: float
- *       400:
- *         description: Geçersiz istek.
- *       403:
- *         description: Yetkisiz erişim.
- *       500:
- *         description: Sunucu hatası.
- */
-router.get(
-    "/department/:departmentId",
-    isAdmin,
-    [
-        param("departmentId").isInt({ gt: 0 }).withMessage("Geçerli bölüm ID girin."),
-        query("startDate").optional().isISO8601().toDate(),
-        query("endDate").optional().isISO8601().toDate()
-    ],
-    async (req, res, next) => {
-        logger.debug('🔍 Bölüm raporu isteği alındı', { department_id: req.params.departmentId, start_date: req.query.startDate, end_date: req.query.endDate, user_id: req.user?.id });
-        const errors = validationResult(req);
-        if (!errors.isEmpty()) {
-            logger.warn('❌ Doğrulama hatası', { errors: errors.array(), department_id: req.params.departmentId, user_id: req.user?.id });
-            return res.status(400).json({ hatalar: errors.array() });
-        }
-
-        const { departmentId } = req.params;
-        const { startDate, endDate } = req.query;
-
-        let dateFilter = "";
-        const queryParams = [departmentId];
-        let paramCounter = 2;
-
-        if (startDate && endDate) {
-            dateFilter = `AND o.tarih BETWEEN $${paramCounter++} AND $${paramCounter++}`;
-            queryParams.push(startDate, endDate);
-        } else if (startDate) {
-            dateFilter = `AND o.tarih >= $${paramCounter++}`;
-            queryParams.push(startDate);
-        } else if (endDate) {
-            dateFilter = `AND o.tarih <= $${paramCounter++}`;
-            queryParams.push(endDate);
-        }
-
-        try {
-            logger.debug('Bölüm ders bazlı rapor hesaplanıyor', { department_id: departmentId, start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            const dersQuery = `
-            SELECT
-                d.id AS ders_id,
-                d.ad AS ders_adi,
-                COUNT(DISTINCT dk.ogrenci_id) AS toplam_ogrenci,
-                COUNT(DISTINCT o.id) AS toplam_oturum,
-                COALESCE(
-                    (CAST(SUM(CASE WHEN y.durum IN ('katildi', 'gec_geldi') THEN 1 ELSE 0 END) AS FLOAT) * 100.0) /
-                    NULLIF(CAST(COUNT(DISTINCT dk.ogrenci_id) AS FLOAT) * CAST(COUNT(DISTINCT o.id) AS FLOAT), 0),
-                0) AS katilim_orani
-            FROM dersler d
-            INNER JOIN ders_kayitlari dk ON dk.ders_id = d.id
-            LEFT JOIN oturumlar o ON o.ders_id = d.id ${dateFilter.replace('AND o.tarih', 'AND o.tarih')}
-            LEFT JOIN yoklamalar y ON y.oturum_id = o.id AND y.ogrenci_id = dk.ogrenci_id
-            WHERE d.bolum_id = $1
-            GROUP BY d.id, d.ad
-            ORDER BY d.ad;
-            `;
-            const dersResult = await pool.query(dersQuery, queryParams);
-
-            logger.info('✅ Bölüm raporu başarıyla oluşturuldu', { department_id: departmentId, ders_sayisi: dersResult.rows.length, user_id: req.user?.id });
-            res.status(200).json(
-            dersResult.rows.map(row => ({
-                ...row,
-                toplam_ogrenci: parseInt(row.toplam_ogrenci),
-                toplam_oturum: parseInt(row.toplam_oturum), // <-- السطر الصحيح
-                katilim_orani: parseFloat(row.katilim_orani.toFixed(2))
-            }))
-        );
-
-        } catch (err) {
-            console.error("Bölüm dersi rapor hatası:", err);
-            logger.error('❌ Bölüm dersi rapor hatası', { error: err.message, stack: err.stack, department_id: departmentId, start_date: startDate, end_date: endDate, user_id: req.user?.id });
-            next(err);
-        }
-    }
-);
-
-
-
-
-
-/**
- * @swagger
- * /api/reports/analytics-data:
- *   post:
- *     summary: "Zaman aralığına göre gruplandırılmış yoklama analizi verilerini getirir."
- *     tags: [Raporlar]
+ * /api/users/me/profile:
+ *   put:
+ *     summary: Oturum açmış kullanıcının profil bilgilerini günceller.
+ *     tags: [Auth, Kullanıcı]
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -812,244 +32,625 @@ router.get(
  *           schema:
  *             type: object
  *             properties:
- *               timeRange:
+ *               ad:
  *                 type: string
- *                 enum: [daily, weekly, monthly]
+ *                 description: Kullanıcının adı.
+ *               soyad:
+ *                 type: string
+ *                 description: Kullanıcının soyadı.
+ *               eposta:
+ *                 type: string
+ *                 format: email
+ *                 description: Kullanıcının e-posta adresi (eğer değiştirilebilir ise).
+ *               telefon:
+ *                 type: string
+ *                 description: Kullanıcının telefon numarası (eğer varsa).
  *     responses:
  *       200:
- *         description: "Analiz verileri başarıyla alındı."
+ *         description: Profil başarıyla güncellendi.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Kullanici' # Assuming Kullanici schema exists
+ *       400:
+ *         description: Doğrulama hatası veya güncellenecek alan yok.
+ *       401:
+ *         description: Yetkisiz erişim (token gerekli).
+ *       409:
+ *         description: E-posta zaten kullanımda (eğer e-posta değiştiriliyorsa).
+ *       500:
+ *         description: Sunucu hatası.
+ */
+router.put(
+    "/me/profile",
+    verifyToken,
+    [
+        // قواعد التحقق من صحة البيانات المدخلة
+        body("ad").optional().isString().trim().notEmpty().withMessage("Ad boş olamaz."),
+        body("soyad").optional().isString().trim().notEmpty().withMessage("Soyad boş olamaz."),
+        body("eposta").optional().isEmail().withMessage("Geçerli bir e-posta adresi giriniz."),
+        body("telefon").optional().isString().trim(),
+        // إضافة قاعدة تحقق للقسم إذا كان سيتم تحديثه
+        body("bolum_id").optional().isInt({ gt: 0 }).withMessage("Geçerli bir bölüm ID girilmelidir.")
+    ],
+    async (req, res, next) => {
+        logger.debug("🔍 Profil güncelleme isteği alındı", { user_id: req.user?.id });
+
+        // التحقق من وجود أخطاء في البيانات المدخلة
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            logger.warn("❌ Doğrulama hatası", { errors: errors.array(), user_id: req.user?.id });
+            return res.status(400).json({ hatalar: errors.array() });
+        }
+
+        const userId = req.user.id;
+        // استخراج الحقول القابلة للتحديث من جسم الطلب
+        const { ad, soyad, eposta, telefon, bolum_id } = req.body;
+
+        // بناء كائن يحتوي فقط على الحقول التي سيتم تحديثها
+        const updateFields = {};
+        if (ad) updateFields.ad = ad;
+        if (soyad) updateFields.soyad = soyad;
+        if (eposta) updateFields.eposta = eposta;
+        if (telefon !== undefined) updateFields.telefon = telefon;
+        if (bolum_id) updateFields.bolum_id = bolum_id;
+
+        // إذا لم يتم إرسال أي حقل للتحديث، يتم إرجاع خطأ
+        if (Object.keys(updateFields).length === 0) {
+            logger.warn("❌ Güncellenecek alan belirtilmedi", { user_id: userId });
+            return res.status(400).json({ mesaj: "Güncellenecek alan belirtilmedi." });
+        }
+
+        try {
+            // التحقق مما إذا كان البريد الإلكتروني الجديد مستخدماً من قبل شخص آخر
+            if (eposta) {
+                const emailCheck = await pool.query("SELECT id FROM kullanicilar WHERE eposta = $1 AND id != $2", [eposta, userId]);
+                if (emailCheck.rows.length > 0) {
+                    logger.warn("❌ E-posta zaten kullanımda", { eposta, user_id: userId });
+                    return res.status(409).json({ mesaj: "Bu e-posta adresi zaten başka bir kullanıcı tarafından kullanılıyor." });
+                }
+            }
+
+            // --- بداية منطق التحديث والاسترجاع المعدل ---
+
+            // 1. بناء جملة SET ديناميكياً لتحديث الحقول المطلوبة فقط
+            const setClauses = Object.keys(updateFields).map((key, index) => `${key} = $${index + 1}`);
+            const values = Object.values(updateFields);
+            values.push(userId);
+
+            // 2. تنفيذ استعلام التحديث
+            const updateQuery = `UPDATE kullanicilar SET ${setClauses.join(", ")}, guncelleme_tarihi = CURRENT_TIMESTAMP WHERE id = $${values.length} RETURNING id`;
+            const updateResult = await pool.query(updateQuery, values);
+
+            // التحقق من أن عملية التحديث تمت بنجاح
+            if (updateResult.rowCount === 0) {
+                logger.warn("❌ Kullanıcı bulunamadı (güncelleme sırasında)", { user_id: userId });
+                return res.status(404).json({ mesaj: "Güncelleme sırasında kullanıcı bulunamadı." });
+            }
+
+            // 3. بعد نجاح التحديث، تنفيذ استعلام جديد لجلب البيانات الكاملة والمحدثة
+            const selectQuery = `
+                SELECT 
+                    k.id, 
+                    k.universite_kodu, 
+                    k.ad, 
+                    k.soyad, 
+                    k.eposta, 
+                    k.rol, 
+                    k.telefon, 
+                    k.aktif_mi,
+                    b.ad AS bolum_adi,     
+                    f.ad AS fakulte_adi     
+                FROM kullanicilar k
+                LEFT JOIN bolumler b ON k.bolum_id = b.id
+                LEFT JOIN fakulteler f ON b.fakulte_id = f.id
+                WHERE k.id = $1;
+            `;
+            const { rows } = await pool.query(selectQuery, [userId]);
+
+            // --- نهاية منطق التحديث والاسترجاع المعدل ---
+
+            logger.info("✅ Profil başarıyla güncellendi", { user_id: userId, updated_fields: Object.keys(updateFields) });
+            
+            // 4. إرجاع الكائن الكامل الذي يحتوي على جميع البيانات المحدثة
+            res.status(200).json(rows[0]);
+
+        } catch (err) {
+            logger.error("❌ Profil güncelleme hatası", { error: err.message, stack: err.stack, user_id: userId });
+            next(err);
+        }
+    }
+);
+
+
+/**
+ * @swagger
+ * /api/users/me/change-password:
+ *   put:
+ *     summary: Oturum açmış kullanıcının şifresini değiştirir.
+ *     tags: [Auth, Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - mevcut_sifre
+ *               - yeni_sifre
+ *             properties:
+ *               mevcut_sifre:
+ *                 type: string
+ *                 format: password
+ *                 description: Kullanıcının mevcut şifresi.
+ *               yeni_sifre:
+ *                 type: string
+ *                 format: password
+ *                 minLength: 6
+ *                 description: Kullanıcının yeni şifresi.
+ *     responses:
+ *       200:
+ *         description: Şifre başarıyla değiştirildi.
+ *       400:
+ *         description: Doğrulama hatası (eksik veya geçersiz şifreler).
+ *       401:
+ *         description: Yetkisiz erişim veya mevcut şifre yanlış.
+ *       500:
+ *         description: Sunucu hatası.
+ */
+router.put(
+    "/me/change-password",
+    verifyToken,
+    [
+        body("mevcut_sifre").notEmpty().withMessage("Mevcut şifre gerekli."),
+        body("yeni_sifre").isLength({ min: 6 }).withMessage("Yeni şifre en az 6 karakter olmalı.")
+    ],
+    async (req, res, next) => {
+        logger.debug("🔍 Şifre değiştirme isteği alındı", { user_id: req.user?.id });
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            logger.warn("❌ Doğrulama hatası", { errors: errors.array(), user_id: req.user?.id });
+            return res.status(400).json({ hatalar: errors.array() });
+        }
+
+        const userId = req.user.id;
+        const { mevcut_sifre, yeni_sifre } = req.body;
+
+        try {
+            const userQuery = await pool.query("SELECT sifre FROM kullanicilar WHERE id = $1", [userId]);
+            if (userQuery.rows.length === 0) {
+                logger.warn("❌ Kullanıcı bulunamadı", { user_id: userId });
+                return res.status(401).json({ mesaj: "Kullanıcı bulunamadı (yetkilendirme sorunu)." });
+            }
+            const storedPasswordHash = userQuery.rows[0].sifre;
+
+            const isMatch = await bcrypt.compare(mevcut_sifre, storedPasswordHash);
+            if (!isMatch) {
+                logger.warn("❌ Mevcut şifre yanlış", { user_id: userId });
+                return res.status(401).json({ mesaj: "Mevcut şifre yanlış." });
+            }
+
+            const newHashedPassword = await bcrypt.hash(yeni_sifre, 10);
+
+            await pool.query(
+                "UPDATE kullanicilar SET sifre = $1, son_sifre_degisikligi = CURRENT_TIMESTAMP WHERE id = $2",
+                [newHashedPassword, userId]
+            );
+
+            logger.info("✅ Şifre başarıyla değiştirildi", { user_id: userId });
+            res.status(200).json({ mesaj: "Şifreniz başarıyla değiştirildi." });
+        } catch (err) {
+            logger.error("❌ Şifre değiştirme hatası", { error: err.message, stack: err.stack, user_id: userId });
+            next(err);
+        }
+    }
+);
+
+/**
+ * @swagger
+ * /api/users/me/profile:
+ *   get:
+ *     summary: Oturum açmış kullanıcının profil bilgilerini getirir.
+ *     tags: [Auth, Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Kullanıcı profili başarıyla getirildi.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 universite_kodu:
+ *                   type: string
+ *                 ad:
+ *                   type: string
+ *                 soyad:
+ *                   type: string
+ *                 eposta:
+ *                   type: string
+ *                 rol:
+ *                   type: string
+ *                 bolum:
+ *                   type: string
+ *                 fakulte:
+ *                   type: string
+ *       401:
+ *         description: Yetkisiz erişim (token gerekli).
+ *       404:
+ *         description: Kullanıcı bulunamadı.
+ *       500:
+ *         description: Sunucu hatası.
+ */
+router.get(
+    "/me/profile",
+    verifyToken,
+    async (req, res, next) => {
+        logger.debug("🔍 Profil bilgisi alma isteği alındı", { user_id: req.user?.id });
+        try {
+            const userId = req.user.id;
+            const result = await pool.query(
+                "SELECT id, universite_kodu, ad, soyad, eposta, rol, telefon, hesap_durumu, aktif_mi FROM kullanicilar WHERE id = $1",
+                [userId]
+            );
+            if (result.rows.length === 0) {
+                logger.warn("❌ Kullanıcı bulunamadı", { user_id: userId });
+                return res.status(404).json({ mesaj: "Kullanıcı bulunamadı" });
+            }
+            logger.info("✅ Profil bilgileri getirildi", { user_id: userId });
+            res.json(result.rows[0]);
+        } catch (err) {
+            logger.error("❌ Profil bilgisi alma hatası", { error: err.message, stack: err.stack, user_id: req.user?.id });
+            next(err);
+        }
+    }
+);
+
+/**
+ * @swagger
+ * /api/kullanici:
+ *   get:
+ *     summary: Tüm kullanıcıları listeler (sadece admin).
+ *     tags: [Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Kullanıcı listesi başarıyla getirildi.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Kullanici'
+ *       403:
+ *         description: Yetkisiz erişim
+ *       500:
+ *         description: Sunucu hatası
+ */
+router.get(
+    "/",
+    verifyToken,
+    sadeceAdmin,
+    async (req, res, next) => {
+        logger.debug("🔍 Tüm kullanıcıları listeleme isteği alındı", { user_id: req.user?.id });
+        try {
+            const { rows } = await pool.query(
+                "SELECT id, universite_kodu, ad, soyad, eposta, rol, hesap_durumu, olusturma_tarihi, son_giris FROM kullanicilar ORDER BY id ASC"
+            );
+            logger.info(`✅ ${rows.length} kullanıcı listelendi`, { user_id: req.user?.id });
+            res.status(200).json(rows);
+        } catch (err) {
+            logger.error("❌ Kullanıcı listeleme hatası", { error: err.message, stack: err.stack, user_id: req.user?.id });
+            next(err);
+        }
+    }
+);
+
+/**
+ * @swagger
+ * /api/kullanici/{id}:
+ *   get:
+ *     summary: Belirli bir kullanıcıyı getirir (sadece admin).
+ *     tags: [Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Kullanıcı ID'si
+ *     responses:
+ *       200:
+ *         description: Kullanıcı başarıyla getirildi.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 universite_kodu:
+ *                   type: string
+ *                 ad:
+ *                   type: string
+ *                 soyad:
+ *                   type: string
+ *                 eposta:
+ *                   type: string
+ *                 rol:
+ *                   type: string
+ *                 hesap_durumu:
+ *                   type: string
+ *                 bolum_id:
+ *                   type: string
+ *                 fakulte_id:
+ *                   type: string
+ *       401:
+ *         description: Yetkisiz erişim (token gerekli).
+ *       403:
+ *         description: Sadece admin erişebilir.
+ *       404:
+ *         description: Kullanıcı bulunamadı.
+ *       500:
+ *         description: Sunucu hatası.
+ */
+router.get(
+    "/:id",
+    verifyToken,
+    sadeceAdmin,
+    async (req, res, next) => {
+        logger.debug("🔍 Kullanıcı detayları isteği alındı", { kullanici_id: req.params.id, user_id: req.user?.id });
+        try {
+            const { id } = req.params;
+            const result = await pool.query(
+                "SELECT id, universite_kodu, ad, soyad, eposta, rol, hesap_durumu, bolum_id, fakulte_id FROM kullanicilar WHERE id = $1",
+                [id]
+            );
+
+            if (result.rows.length === 0) {
+                logger.warn("❌ Kullanıcı bulunamadı", { kullanici_id: id, user_id: req.user?.id });
+                return res.status(404).json({ mesaj: "Kullanıcı bulunamadı" });
+            }
+
+            logger.info("✅ Kullanıcı detayları getirildi", { kullanici_id: id, user_id: req.user?.id });
+            res.json(result.rows[0]);
+        } catch (err) {
+            logger.error("❌ Kullanıcı detayları getirme hatası", { error: err.message, stack: err.stack, kullanici_id: req.params.id, user_id: req.user?.id });
+            next(err);
+        }
+    }
+);
+/**
+ * @swagger
+ * /api/kullanicilar/list-by-ids:
+ *   post:
+ *     summary: "Belirtilen ID listesindeki kullanıcıları (öğrencileri) getirir"
+ *     tags: [Kullanıcı, Rapor]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - ids
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *                 description: "Detayları getirilecek kullanıcıların ID listesi"
+ *     responses:
+ *       200:
+ *         description: "Kullanıcı listesi başarıyla getirildi"
+ *       400:
+ *         description: "Geçersiz istek verisi"
  */
 router.post(
-  "/analytics-data",
-  isAdmin,
-  [body("timeRange").isIn(['daily', 'weekly', 'monthly']).withMessage("timeRange must be daily, weekly, or monthly")],
+  "/list-by-ids",
+  verifyToken, // 👈 تأكد من أن المستخدم مسجل دخوله
+  sadeceAdmin,   // 👈 تأكد من أن المستخدم هو مدير (يمكن تغييرها إلى sadeceOgretmenVeAdmin إذا لزم الأمر)
+  [
+    body("ids")
+      .isArray({ min: 1 }).withMessage("ID listesi bir dizi olmalı ve boş olmamalıdır.")
+      .custom((ids) => {
+        if (!ids.every(id => Number.isInteger(id) && id > 0)) {
+          throw new Error("Tüm ID'ler pozitif tamsayı olmalıdır.");
+        }
+        return true;
+      }),
+  ],
   async (req, res, next) => {
-    const { timeRange } = req.body;
-    logger.debug('🔍 Analiz verisi isteği alındı', { time_range: timeRange, user_id: req.user?.id });
-    let dateGroup;
-    switch (timeRange) {
-      case 'weekly': dateGroup = "DATE_TRUNC('week', o.tarih)"; break;
-      case 'monthly': dateGroup = "DATE_TRUNC('month', o.tarih)"; break;
-      default: dateGroup = "DATE(o.tarih)"; break;
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn("❌ /kullanicilar/list-by-ids doğrulama hatası", { errors: errors.array(), user_id: req.user?.id });
+      return res.status(400).json({ hatalar: errors.array() });
     }
+
+    const { ids } = req.body;
+    logger.debug("🔍 ID listesine göre kullanıcı listeleme isteği alındı", { user_id: req.user?.id, count: ids.length });
+
     try {
       const query = `
         SELECT 
-          T.period_start,
-          ROUND(AVG(T.attendance_percentage)) as average_attendance
-        FROM (
-          SELECT 
-            ${dateGroup}::date as period_start,
-            (
-              COUNT(y.id) FILTER (WHERE y.durum IN ('katildi', 'gec_geldi')) * 100.0 
-              / 
-              NULLIF((SELECT COUNT(*) FROM ders_kayitlari dk WHERE dk.ders_id = o.ders_id AND dk.alinma_tipi = 'zorunlu'), 0)
-            ) as attendance_percentage
-          FROM oturumlar o
-          LEFT JOIN yoklamalar y ON y.oturum_id = o.id
-          WHERE (SELECT COUNT(*) FROM ders_kayitlari dk WHERE dk.ders_id = o.ders_id AND dk.alinma_tipi = 'zorunlu') > 0
-          GROUP BY o.id, period_start
-        ) AS T
-        WHERE T.attendance_percentage IS NOT NULL
-        GROUP BY T.period_start
-        ORDER BY T.period_start ASC;
+          id,
+          ad,
+          soyad,
+          eposta,
+          universite_kodu,
+          rol,
+          olusturma_tarihi
+        FROM kullanicilar
+        WHERE id = ANY($1::int[])
+        ORDER BY soyad, ad;
       `;
-      const { rows: attendanceTrend } = await pool.query(query);
-      logger.info(`✅ Analiz verisi başarıyla oluşturuldu`, { time_range: timeRange, data_points: attendanceTrend.length, user_id: req.user?.id });
-      res.status(200).json({ attendanceTrend });
+
+      const { rows } = await pool.query(query, [ids]);
+
+      logger.info(`✅ ID listesine göre ${rows.length} kullanıcı bulundu`, { user_id: req.user?.id });
+      res.status(200).json(rows);
+
     } catch (err) {
-      logger.error("❌ Analiz verisi hatası", { error: err.message, stack: err.stack, time_range: timeRange, user_id: req.user?.id });
-      res.status(500).json({ mesaj: err.message, detay: err.stack });
+      logger.error("❌ ID listesine göre kullanıcı listeleme hatası", { error: err.message, stack: err.stack, user_id: req.user?.id });
+      next(err);
     }
   }
 );
 
 /**
  * @swagger
- * /api/reports/active-students-list:
- *   get:
- *     summary: "Belirtilen filtrelere göre aktif olan öğrencilerin listesini getirir."
- *     tags: [Raporlar, Dashboard]
+ * /api/kullanici/{id}:
+ *   delete:
+ *     summary: Belirli bir kullanıcıyı siler (sadece admin).
+ *     tags: [Kullanıcı]
  *     security:
  *       - bearerAuth: []
  *     parameters:
- *       - in: query
- *         name: facultyId
- *         schema: { type: integer }
- *         description: "Fakülte ID'sine göre filtrele"
- *       - in: query
- *         name: startDate
- *         schema: { type: string, format: date }
- *         description: "Başlangıç tarihi (YYYY-MM-DD)"
- *       - in: query
- *         name: endDate
- *         schema: { type: string, format: date }
- *         description: "Bitiş tarihi (YYYY-MM-DD)"
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Silinecek kullanıcının ID'si
  *     responses:
  *       200:
- *         description: "Aktif öğrencilerin listesi"
+ *         description: Kullanıcı başarıyla silindi.
+ *       401:
+ *         description: Yetkisiz erişim (token gerekli).
+ *       403:
+ *         description: Sadece admin erişebilir.
+ *       404:
+ *         description: Kullanıcı bulunamadı.
  *       500:
- *         description: "Sunucu hatası"
+ *         description: Sunucu hatası.
  */
-router.get("/active-students-list", verifyToken, isAdmin, async (req, res, next) => {
-    const { facultyId, startDate, endDate } = req.query;
-    logger.debug('🔍 Aktif öğrenci listesi isteği alındı', { query: req.query });
+router.delete(
+    "/:id",
+    verifyToken,
+    sadeceAdmin,
+    async (req, res, next) => {
+        logger.debug("🔍 Kullanıcı silme isteği alındı", { kullanici_id: req.params.id, user_id: req.user?.id });
+        try {
+            const { id } = req.params;
 
-    try {
-        const params = [];
-        let paramIndex = 1;
-        let whereClauses = [];
+            const checkUser = await pool.query(
+                "SELECT id FROM kullanicilar WHERE id = $1",
+                [id]
+            );
 
-        if (facultyId) {
-            whereClauses.push(`f.id = $${paramIndex++}`);
-            params.push(facultyId);
+            if (checkUser.rows.length === 0) {
+                logger.warn("❌ Kullanıcı bulunamadı", { kullanici_id: id, user_id: req.user?.id });
+                return res.status(404).json({ mesaj: "Kullanıcı bulunamadı" });
+            }
+
+            await pool.query(
+                "DELETE FROM kullanicilar WHERE id = $1",
+                [id]
+            );
+
+            logger.info("✅ Kullanıcı başarıyla silindi", { kullanici_id: id, user_id: req.user?.id });
+            res.json({ mesaj: "Kullanıcı başarıyla silindi" });
+        } catch (err) {
+            logger.error("❌ Kullanıcı silme hatası", { error: err.message, stack: err.stack, kullanici_id: req.params.id, user_id: req.user?.id });
+            next(err);
         }
-        if (startDate) {
-            whereClauses.push(`y.zaman::date >= $${paramIndex++}`);
-            params.push(startDate);
-        }
-        if (endDate) {
-            whereClauses.push(`y.zaman::date <= $${paramIndex++}`);
-            params.push(endDate);
-        }
-
-        // إذا لم يتم تحديد أي فلتر تاريخ، افترض اليوم
-        if (!startDate && !endDate) {
-            whereClauses.push(`y.zaman >= CURRENT_DATE`);
-        }
-
-        const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
-        const query = `
-            SELECT DISTINCT ON (k.id)
-                k.id as ogrenci_id,
-                k.universite_kodu,
-                k.ad,
-                k.soyad,
-                k.eposta,
-                b.ad as bolum_adi,
-                f.ad as fakulte_adi,
-                y.zaman as son_aktivite
-            FROM yoklamalar y
-            JOIN kullanicilar k ON y.ogrenci_id = k.id
-            LEFT JOIN oturumlar o ON y.oturum_id = o.id
-            LEFT JOIN dersler d ON o.ders_id = d.id
-            LEFT JOIN bolumler b ON d.bolum_id = b.id
-            LEFT JOIN fakulteler f ON b.fakulte_id = f.id
-            ${whereClause}
-            ORDER BY k.id, y.zaman DESC;
-        `;
-
-        const { rows } = await pool.query(query, params);
-        logger.info(`✅ ${rows.length} aktif öğrenci bulundu.`);
-        res.status(200).json(rows);
-
-    } catch (err) {
-        logger.error('❌ Aktif öğrenci listesi getirme hatası', { error: err.message, stack: err.stack });
-        next(err);
     }
-});
-
-// =================================================================
-// --- ✅ (Teacher Reports) ---
-// =================================================================
+);
 
 /**
  * @swagger
- * /api/reports/course/{courseId}/sessions:
- *   get:
- *     summary: "Bir derse ait tüm oturumları listeler (Öğretmen Raporu için)"
- *     tags: [Raporlar, Öğretmen]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: courseId
- *         required: true
- *         schema: { type: integer }
- *         description: "Oturumları listelenecek dersin ID'si"
- *     responses:
- *       200:
- *         description: "Derse ait oturumların listesi"
- */
-router.get("/course/:courseId/sessions", verifyToken, sadeceOgretmenVeAdmin, async (req, res, next) => {
-    const { courseId } = req.params;
-    logger.debug(`🔍 Bir derse ait oturumlar isteniyor: Ders ID ${courseId}`);
-
-    try {
-        const query = `
-            SELECT 
-                o.id,
-                o.konu,
-                o.tarih,
-                TO_CHAR(o.saat, 'HH24:MI') as saat,
-                (SELECT COUNT(y.id) FROM yoklamalar y WHERE y.oturum_id = o.id AND y.durum IN ('katildi', 'gec_geldi')) as katilan_sayisi,
-                (SELECT COUNT(dk.ogrenci_id) FROM ders_kayitlari dk WHERE dk.ders_id = o.ders_id) as toplam_kayitli
-            FROM oturumlar o
-            WHERE o.ders_id = $1
-            ORDER BY o.tarih DESC, o.saat DESC;
-        `;
-        const { rows } = await pool.query(query, [courseId]);
-        logger.info(`✅ ${rows.length} oturum bulundu: Ders ID ${courseId}`);
-        res.status(200).json(rows);
-    } catch (err) {
-        logger.error(`❌ Ders oturumları alınırken hata: Ders ID ${courseId}`, { error: err.message });
-        next(err);
-    }
-});
-
-/**
- * @swagger
- * /api/reports/session/{sessionId}/attendance:
- *   get:
- *     summary: "Belirli bir oturumun yoklama listesini getirir (Öğretmen Raporu için)"
- *     tags: [Raporlar, Öğretmen]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: sessionId
- *         required: true
- *         schema: { type: integer }
- *         description: "Yoklama listesi getirilecek oturumun ID'si"
- *     responses:
- *       200:
- *         description: "Oturumun yoklama listesi"
- */
-router.get("/session/:sessionId/attendance", verifyToken, sadeceOgretmenVeAdmin, async (req, res, next) => {
-    const { sessionId } = req.params;
-    logger.debug(`🔍 Bir oturumun yoklama listesi isteniyor: Oturum ID ${sessionId}`);
-
-    try {
-        const query = `
-            SELECT 
-                k.id as ogrenci_id,
-                k.universite_kodu,
-                k.ad,
-                k.soyad,
-                y.id as yoklama_id,
-                COALESCE(y.durum, 'katilmadi') as durum
-            FROM ders_kayitlari dk
-            JOIN kullanicilar k ON dk.ogrenci_id = k.id
-            LEFT JOIN yoklamalar y ON y.ogrenci_id = dk.ogrenci_id AND y.oturum_id = $1
-            WHERE dk.ders_id = (SELECT ders_id FROM oturumlar WHERE id = $1)
-            ORDER BY k.soyad, k.ad;
-        `;
-        const { rows } = await pool.query(query, [sessionId]);
-        logger.info(`✅ ${rows.length} öğrencinin yoklama durumu bulundu: Oturum ID ${sessionId}`);
-        res.status(200).json(rows);
-    } catch (err) {
-        logger.error(`❌ Oturum yoklama listesi alınırken hata: Oturum ID ${sessionId}`, { error: err.message });
-        next(err);
-    }
-});
-
-/**
- * @swagger
- * /api/reports/attendance:
+ * /api/kullanici/{id}:
  *   put:
- *     summary: "Bir öğrencinin yoklama durumunu manuel olarak günceller (Öğretmen Raporu için)"
- *     tags: [Raporlar, Öğretmen]
+ *     summary: Belirli bir kullanıcıyı günceller (sadece admin).
+ *     tags: [Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Güncellenecek kullanıcının ID'si
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               ad:
+ *                 type: string
+ *               soyad:
+ *                 type: string
+ *               eposta:
+ *                 type: string
+ *               universite_kodu:
+ *                 type: string
+ *               rol:
+ *                 type: string
+ *               hesap_durumu:
+ *                 type: string
+ *               bolum_id:
+ *                 type: string
+ *               fakulte_id:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Kullanıcı başarıyla güncellendi.
+ *       400:
+ *         description: Geçersiz istek.
+ *       401:
+ *         description: Yetkisiz erişim.
+ *       403:
+ *         description: Sadece admin erişebilir.
+ *       404:
+ *         description: Kullanıcı bulunamadı.
+ *       500:
+ *         description: Sunucu hatası.
+ */
+router.put(
+    "/:id",
+    verifyToken,
+    sadeceAdmin,
+    async (req, res, next) => {
+        logger.debug("🔍 Kullanıcı güncelleme isteği alındı", { kullanici_id: req.params.id, user_id: req.user?.id });
+        const { id } = req.params;
+        const { ad, soyad, eposta, universite_kodu, rol, hesap_durumu, bolum_id, fakulte_id } = req.body;
+        try {
+            const result = await pool.query(
+                `UPDATE kullanicilar SET ad=$1, soyad=$2, eposta=$3, universite_kodu=$4, rol=$5, hesap_durumu=$6, bolum_id=$7, fakulte_id=$8 WHERE id=$9 RETURNING *`,
+                [ad, soyad, eposta, universite_kodu, rol, hesap_durumu, bolum_id, fakulte_id, id]
+            );
+            if (result.rows.length === 0) {
+                logger.warn("❌ Kullanıcı bulunamadı", { kullanici_id: id, user_id: req.user?.id });
+                return res.status(404).json({ mesaj: "Kullanıcı bulunamadı" });
+            }
+            logger.info("✅ Kullanıcı başarıyla güncellendi", { kullanici_id: id, user_id: req.user?.id });
+            res.json(result.rows[0]);
+        } catch (err) {
+            logger.error("❌ Kullanıcı güncelleme hatası", { error: err.message, stack: err.stack, kullanici_id: id, user_id: req.user?.id });
+            next(err);
+        }
+    }
+);
+
+/**
+ * @swagger
+ * /api/kullanici/ekle:
+ *   post:
+ *     summary: Yeni kullanıcı (admin, öğretmen veya öğrenci) ekler. Sadece admin yapabilir.
+ *     tags: [Kullanıcı]
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -1058,50 +659,132 @@ router.get("/session/:sessionId/attendance", verifyToken, sadeceOgretmenVeAdmin,
  *         application/json:
  *           schema:
  *             type: object
+ *             required:
+ *               - universite_kodu
+ *               - ad
+ *               - soyad
+ *               - sifre
+ *               - rol
  *             properties:
- *               ogrenci_id: { type: integer }
- *               oturum_id: { type: integer }
- *               yeni_durum: { type: string, enum: [katildi, katilmadi, gec_geldi, izinli] }
- *     responses:
- *       200:
- *         description: "Yoklama durumu başarıyla güncellendi."
+ *               universite_kodu:
+ *                 type: string
+ *               ad:
+ *                 type: string
+ *               soyad:
+ *                 type: string
+ *               eposta:
+ *                 type: string
+ *               sifre:
+ *                 type: string
+ *               rol:
+ *                 type: string
+ *               hesap_durumu:
+ *                 type: string
  */
-router.put("/attendance", verifyToken, sadeceOgretmenVeAdmin, async (req, res, next) => {
-    const { ogrenci_id, oturum_id, yeni_durum } = req.body;
-    logger.debug(`🔄 Yoklama manuel güncelleme isteği: Öğrenci ${ogrenci_id}, Oturum ${oturum_id}, Yeni Durum: ${yeni_durum}`);
-
-    try {
-        const existingAttendance = await pool.query(
-            'SELECT id FROM yoklamalar WHERE ogrenci_id = $1 AND oturum_id = $2',
-            [ogrenci_id, oturum_id]
-        );
-
-        if (existingAttendance.rows.length > 0) {
-            const yoklamaId = existingAttendance.rows[0].id;
-            const { rows } = await pool.query(
-                'UPDATE yoklamalar SET durum = $1, zaman = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-                [yeni_durum, yoklamaId]
-            );
-            res.status(200).json({ mesaj: "Yoklama durumu başarıyla güncellendi.", data: rows[0] });
-        } else {
-            const { rows } = await pool.query(
-                'INSERT INTO yoklamalar (ogrenci_id, oturum_id, durum, zaman, tarama_tipi) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4) RETURNING *',
-                [ogrenci_id, oturum_id, yeni_durum, 'manuel']
-            );
-            res.status(201).json({ mesaj: "Öğrenci için yeni yoklama kaydı oluşturuldu.", data: rows[0] });
+router.post(
+    "/ekle",
+    verifyToken,
+    sadeceAdmin,
+    [
+        body("universite_kodu").notEmpty().withMessage("Üniversite kodu gerekli."),
+        body("ad").notEmpty().withMessage("Ad gerekli."),
+        body("soyad").notEmpty().withMessage("Soyad gerekli."),
+        body("sifre").isLength({ min: 6 }).withMessage("Şifre en az 6 karakter olmalı."),
+        body("eposta").optional().isEmail().withMessage("Geçerli e-posta giriniz."),
+        body("rol").isIn(["admin", "ogretmen", "ogrenci"]).withMessage("Geçerli bir rol giriniz."),
+        body("hesap_durumu").optional().isIn(["aktif", "pasif", "askida"])
+    ],
+    async (req, res, next) => {
+        logger.debug("🔍 Yeni kullanıcı ekleme isteği alındı", { universite_kodu: req.body.universite_kodu, user_id: req.user?.id });
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            logger.warn("❌ Doğrulama hatası", { errors: errors.array(), user_id: req.user?.id });
+            return res.status(400).json({ hatalar: errors.array() });
         }
+
+        const { universite_kodu, ad, soyad, eposta, sifre, rol, hesap_durumu = 'aktif', bolum_id, fakulte_id } = req.body;
+
+        try {
+            const exists = await pool.query("SELECT id FROM kullanicilar WHERE universite_kodu = $1", [universite_kodu]);
+            if (exists.rows.length > 0) {
+                logger.warn("❌ Üniversite kodu zaten kayıtlı", { universite_kodu, user_id: req.user?.id });
+                return res.status(409).json({ mesaj: "Bu üniversite kodu zaten kayıtlı." });
+            }
+
+            const hashedPassword = await bcrypt.hash(sifre, 10);
+            const { rows } = await pool.query(
+                `INSERT INTO kullanicilar (universite_kodu, ad, soyad, eposta, sifre, rol, hesap_durumu, bolum_id, fakulte_id, olusturma_tarihi)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+                 RETURNING id, universite_kodu, ad, soyad, eposta, rol, hesap_durumu, bolum_id, fakulte_id, olusturma_tarihi`,
+                [universite_kodu, ad, soyad, eposta, hashedPassword, rol, hesap_durumu, bolum_id || null, fakulte_id || null]
+            );
+
+            logger.info("✅ Kullanıcı başarıyla eklendi", { universite_kodu, kullanici_id: rows[0].id, user_id: req.user?.id });
+            res.status(201).json(rows[0]);
+        } catch (err) {
+            logger.error("❌ Kullanıcı ekleme hatası", { error: err.message, stack: err.stack, universite_kodu, user_id: req.user?.id });
+            next(err);
+        }
+    }
+);
+
+/**
+ * @swagger
+ * /api/kullanici/import-excel:
+ *   post:
+ *     summary: Excel'den kullanıcıları toplu olarak içe aktarır.
+ *     tags: [Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post('/import-excel', verifyToken, sadeceAdmin, async (req, res) => {
+    logger.debug("🔍 Kullanıcıları Excel'den içe aktarma isteği alındı", { user_id: req.user?.id });
+    const users = req.body;
+    try {
+        let addedCount = 0;
+        let skippedCount = 0;
+        for (const user of users) {
+            const exists = await pool.query(
+                'SELECT id FROM kullanicilar WHERE universite_kodu = $1',
+                [user.universite_kodu]
+            );
+            if (exists.rows.length > 0) {
+                logger.warn("⚠️ Üniversite kodu zaten mevcut, atlanıyor", { universite_kodu: user.universite_kodu, user_id: req.user?.id });
+                skippedCount++;
+                continue;
+            }
+
+            await pool.query(
+                `INSERT INTO kullanicilar (universite_kodu, ad, soyad, eposta, sifre, rol, bolum_id, fakulte_id, hesap_durumu, olusturma_tarihi)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'aktif', CURRENT_TIMESTAMP)`,
+                [
+                    user.universite_kodu,
+                    user.ad,
+                    user.soyad,
+                    user.eposta,
+                    await bcrypt.hash(user.sifre, 10),
+                    user.rol,
+                    user.bolum_id,
+                    user.fakulte_id
+                ]
+            );
+            logger.info("✅ Kullanıcı eklendi", { universite_kodu: user.universite_kodu, user_id: req.user?.id });
+            addedCount++;
+        }
+        logger.info(`✅ Toplu kullanıcı ekleme tamamlandı: ${addedCount} eklendi, ${skippedCount} atlandı`, { user_id: req.user?.id });
+        res.json({ success: true, addedCount, skippedCount });
     } catch (err) {
-        logger.error(`❌ Manuel yoklama güncellenirken hata`, { error: err.message, body: req.body });
-        next(err);
+        logger.error("❌ Kullanıcı içe aktarma hatası", { error: err.message, stack: err.stack, user_id: req.user?.id });
+        res.status(500).json({ success: false, error: err.message });
     }
 });
 
 /**
  * @swagger
- * /api/reports/attendance/session-select:
+ * /api/kullanici/bulk-delete:
  *   post:
- *     summary: "Öğrencinin belirli bir oturumdaki katılmama durumunu katıldıya çevirir (Oturum Seç butonu için)"
- *     tags: [Raporlar, Öğretmen]
+ *     summary: Seçilen kullanıcıları toplu olarak siler
+ *     tags: [Kullanıcı]
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -1110,59 +793,266 @@ router.put("/attendance", verifyToken, sadeceOgretmenVeAdmin, async (req, res, n
  *         application/json:
  *           schema:
  *             type: object
+ *             required:
+ *               - userIds
  *             properties:
- *               ogrenci_id: { type: integer }
- *               oturum_id: { type: integer }
- *               tur_no: { type: integer }
+ *               userIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: Silinecek kullanıcı ID'leri
  *     responses:
  *       200:
- *         description: "Öğrenci katıldı olarak işaretlendi."
+ *         description: Kullanıcılar başarıyla silindi
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 deletedCount:
+ *                   type: integer
  *       400:
- *         description: "Geçersiz istek."
+ *         description: Geçersiz istek veya kullanıcı ID'leri
+ *       403:
+ *         description: Yetkisiz erişim
  *       500:
- *         description: "Sunucu hatası."
+ *         description: Sunucu hatası
  */
-router.post("/attendance/session-select", verifyToken, sadeceOgretmenVeAdmin, async (req, res, next) => {
-    const { ogrenci_id, oturum_id, tur_no } = req.body;
-    logger.debug(`🔄 Oturum seç isteği: Öğrenci ${ogrenci_id}, Oturum ${oturum_id}, Tur ${tur_no}`);
+router.post('/bulk-delete', verifyToken, sadeceAdmin, async (req, res) => {
+    logger.debug("🔍 Toplu kullanıcı silme isteği alındı", { user_ids: req.body.userIds, user_id: req.user?.id });
+    const { userIds } = req.body;
+
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+        logger.warn("❌ Geçersiz kullanıcı ID'leri", { user_id: req.user?.id });
+        return res.status(400).json({
+            success: false,
+            message: 'Kullanıcı ID\'leri gerekli ve dizi formatında olmalıdır'
+        });
+    }
+
+    const currentUserId = req.user.id;
+    if (userIds.includes(currentUserId.toString())) {
+        logger.warn("❌ Kullanıcı kendi hesabını silmeye çalıştı", { user_id: currentUserId });
+        return res.status(400).json({
+            success: false,
+            message: 'Kendi hesabınızı silemezsiniz'
+        });
+    }
+
+    const userIdInts = userIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    if (userIdInts.length === 0) {
+        logger.warn("❌ Geçerli kullanıcı ID'si bulunamadı", { user_id: req.user?.id });
+        return res.status(400).json({
+            success: false,
+            message: 'Geçerli kullanıcı ID\'si bulunamadı'
+        });
+    }
+
+    const client = await pool.connect();
 
     try {
-        // Önce mevcut yoklama kaydını kontrol et
-        const existingAttendance = await pool.query(
-            'SELECT id, durum, tur_no FROM yoklamalar WHERE ogrenci_id = $1 AND oturum_id = $2 AND tur_no = $3',
-            [ogrenci_id, oturum_id, tur_no]
+        await client.query('BEGIN');
+
+        await client.query('DELETE FROM yoklamalar WHERE ogrenci_id = ANY($1::int[])', [userIdInts]);
+        await client.query('DELETE FROM ders_kayitlari WHERE ogrenci_id = ANY($1::int[])', [userIdInts]);
+        await client.query('UPDATE dersler SET ogretmen_id = NULL WHERE ogretmen_id = ANY($1::int[])', [userIdInts]);
+        await client.query('DELETE FROM bildirimler WHERE kullanici_id = ANY($1::int[])', [userIdInts]);
+        await client.query('DELETE FROM senkron_log WHERE kullanici_id = ANY($1::int[])', [userIdInts]);
+
+        const deleteResult = await client.query(
+            'DELETE FROM kullanicilar WHERE id = ANY($1::int[])',
+            [userIdInts]
         );
 
-        if (existingAttendance.rows.length > 0) {
-            // Mevcut kayıt varsa durumunu güncelle
-            const yoklamaId = existingAttendance.rows[0].id;
-            const { rows } = await pool.query(
-                'UPDATE yoklamalar SET durum = $1, zaman = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-                ['katildi', yoklamaId]
-            );
-            logger.info(`✅ Mevcut yoklama kaydı güncellendi: Öğrenci ${ogrenci_id}, Tur ${tur_no}`);
-            res.status(200).json({ 
-                mesaj: "Öğrenci katıldı olarak işaretlendi.", 
-                data: rows[0],
-                action: 'updated'
-            });
-        } else {
-            // Yeni kayıt oluştur
-            const { rows } = await pool.query(
-                'INSERT INTO yoklamalar (ogrenci_id, oturum_id, durum, zaman, tarama_tipi, tur_no) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4, $5) RETURNING *',
-                [ogrenci_id, oturum_id, 'katildi', 'manuel', tur_no]
-            );
-            logger.info(`✅ Yeni yoklama kaydı oluşturuldu: Öğrenci ${ogrenci_id}, Tur ${tur_no}`);
-            res.status(201).json({ 
-                mesaj: "Öğrenci için yeni katılım kaydı oluşturuldu.", 
-                data: rows[0],
-                action: 'created'
-            });
-        }
-    } catch (err) {
-        logger.error(`❌ Oturum seç işlemi hatası`, { error: err.message, body: req.body });
-        next(err);
+        await client.query('COMMIT');
+
+        const deletedCount = deleteResult.rowCount;
+        logger.info(`✅ ${deletedCount} kullanıcı başarıyla silindi`, { user_ids: userIdInts, user_id: req.user?.id });
+
+        res.json({
+            success: true,
+            message: `${deletedCount} kullanıcı başarıyla silindi`,
+            deletedCount: deletedCount
+        });
+    } catch (error) {
+        await client.query('ROLLBACK');
+        logger.error("❌ Toplu kullanıcı silme hatası", { error: error.message, stack: error.stack, user_ids: userIdInts, user_id: req.user?.id });
+        res.status(500).json({
+            success: false,
+            message: 'Kullanıcılar silinirken bir veritabanı hatası oluştu.',
+            errorDetails: {
+                message: error.message,
+                code: error.code,
+                constraint: error.constraint,
+            }
+        });
+    } finally {
+        client.release();
     }
+});
+
+/**
+ * @swagger
+ * /api/kullanici/import-users-from-json:
+ *   post:
+ *     summary: Excel'den JSON formatında kullanıcı listesi alır ve sisteme ekler.
+ *     tags: [Kullanıcı]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: array
+ *             items:
+ *               type: object
+ *               properties:
+ *                 universite_kodu:
+ *                   type: string
+ *                 sifre:
+ *                   type: string
+ *                 ad:
+ *                   type: string
+ *                 soyad:
+ *                   type: string
+ *                 eposta:
+ *                   type: string
+ *                 rol:
+ *                   type: string
+ *                 fakulte_ad:
+ *                   type: string
+ *                 bolum_ad:
+ *                   type: string
+ *     responses:
+ *       200:
+ *         description: Kullanıcılar başarıyla içe aktarıldı.
+ *       400:
+ *         description: Geçersiz veri.
+ *       500:
+ *         description: Sunucu hatası.
+ */
+router.post('/import-users-from-json', verifyToken, sadeceAdmin, async (req, res) => {
+    logger.debug("🔍 Kullanıcıları JSON'dan içe aktarma isteği alındı", { user_id: req.user?.id });
+    const usersToImport = req.body;
+
+    if (!Array.isArray(usersToImport) || usersToImport.length === 0) {
+        logger.warn("❌ Boş kullanıcı listesi", { user_id: req.user?.id });
+        return res.status(400).json({ success: false, error: 'İçe aktarılacak kullanıcı listesi boş.' });
+    }
+
+    let addedCount = 0;
+    let errorCount = 0;
+    const detailedErrors = [];
+
+    for (const [index, user] of usersToImport.entries()) {
+        const rowNum = index + 2;
+        logger.debug(`🔍 Kullanıcı işleniyor - Satır ${rowNum}`, { universite_kodu: user.universite_kodu, user_id: req.user?.id });
+        try {
+            if (!user.universite_kodu || !user.ad || !user.soyad || !user.rol || !user.fakulte_ad || !user.bolum_ad) {
+                errorCount++;
+                detailedErrors.push(`Satır ${rowNum}: Temel verilerden biri (kod, ad, soyad, rol, fakülte, bölüm) eksik.`);
+                logger.warn(`❌ Satır ${rowNum}: Eksik veri`, { universite_kodu: user.universite_kodu, user_id: req.user?.id });
+                continue;
+            }
+
+            if (!user.sifre) {
+                errorCount++;
+                detailedErrors.push(`Satır ${rowNum} (${user.universite_kodu}): Şifre alanı boş.`);
+                logger.warn(`❌ Satır ${rowNum}: Şifre eksik`, { universite_kodu: user.universite_kodu, user_id: req.user?.id });
+                continue;
+            }
+
+            const universiteKoduAsString = user.universite_kodu.toString();
+            const sifreAsString = user.sifre.toString();
+
+            const existingUser = await prisma.kullanicilar.findUnique({
+                where: { universite_kodu: universiteKoduAsString },
+            });
+
+            if (existingUser) {
+                errorCount++;
+                detailedErrors.push(`Satır ${rowNum} (${universiteKoduAsString}): Bu üniversite kodu zaten kayıtlı.`);
+                logger.warn(`❌ Satır ${rowNum}: Üniversite kodu zaten mevcut`, { universite_kodu: universiteKoduAsString, user_id: req.user?.id });
+                continue;
+            }
+
+            const fakulte = await prisma.fakulteler.findFirst({
+                where: { ad: { equals: user.fakulte_ad.trim(), mode: 'insensitive' } },
+            });
+
+            if (!fakulte) {
+                errorCount++;
+                detailedErrors.push(`Satır ${rowNum} (${universiteKoduAsString}): Fakülte bulunamadı -> "${user.fakulte_ad}"`);
+                logger.warn(`❌ Satır ${rowNum}: Fakülte bulunamadı`, { universite_kodu: universiteKoduAsString, fakulte_ad: user.fakulte_ad, user_id: req.user?.id });
+                continue;
+            }
+
+            const bolum = await prisma.bolumler.findFirst({
+                where: { ad: { equals: user.bolum_ad.trim(), mode: 'insensitive' } },
+            });
+
+            if (!bolum) {
+                errorCount++;
+                detailedErrors.push(`Satır ${rowNum} (${universiteKoduAsString}): Bölüm bulunamadı -> "${user.bolum_ad}"`);
+                logger.warn(`❌ Satır ${rowNum}: Bölüm bulunamadı`, { universite_kodu: universiteKoduAsString, bolum_ad: user.bolum_ad, user_id: req.user?.id });
+                continue;
+            }
+
+            if (bolum.fakulte_id !== fakulte.id) {
+                errorCount++;
+                detailedErrors.push(`Satır ${rowNum} (${universiteKoduAsString}): Bölüm "${user.bolum_ad}", "${user.fakulte_ad}" fakültesine ait değil.`);
+                logger.warn(`❌ Satır ${rowNum}: Bölüm fakülteye ait değil`, { universite_kodu: universiteKoduAsString, bolum_ad: user.bolum_ad, fakulte_ad: user.fakulte_ad, user_id: req.user?.id });
+                continue;
+            }
+
+            const hashedPassword = await bcrypt.hash(sifreAsString, 10);
+
+            await prisma.kullanicilar.create({
+                data: {
+                    universite_kodu: universiteKoduAsString,
+                    ad: user.ad,
+                    soyad: user.soyad,
+                    eposta: user.eposta,
+                    sifre: hashedPassword,
+                    rol: user.rol,
+                    hesap_durumu: 'aktif',
+                    fakulte_id: fakulte.id,
+                    bolum_id: bolum.id,
+                },
+            });
+
+            logger.info(`✅ Kullanıcı eklendi - Satır ${rowNum}`, { universite_kodu: universiteKoduAsString, user_id: req.user?.id });
+            addedCount++;
+        } catch (err) {
+            errorCount++;
+            detailedErrors.push(`Satır ${rowNum} (${user.universite_kodu || 'Bilinmeyen'}): Beklenmedik sunucu hatası - ${err.message}`);
+            logger.error(`❌ Kullanıcı içe aktarma hatası - Satır ${rowNum}`, { error: err.message, stack: err.stack, universite_kodu: user.universite_kodu, user_id: req.user?.id });
+        }
+    }
+
+    logger.info(`✅ JSON kullanıcı içe aktarma tamamlandı: ${addedCount} eklendi, ${errorCount} hata`, { user_id: req.user?.id });
+    if (addedCount === 0 && errorCount > 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Hiçbir kullanıcı eklenemedi. Lütfen hataları kontrol edin.',
+            addedCount,
+            errorCount,
+            errors: detailedErrors,
+        });
+    }
+
+    res.status(207).json({
+        success: true,
+        message: `${addedCount} kullanıcı başarıyla eklendi, ${errorCount} işlemde hata oluştu.`,
+        addedCount,
+        errorCount,
+        errors: detailedErrors,
+    });
 });
 
 module.exports = router;
