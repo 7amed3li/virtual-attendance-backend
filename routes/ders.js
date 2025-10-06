@@ -22,65 +22,6 @@ const router = express.Router();
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
-router.get(
-  "/ogrenci-dersleri",
-  sadeceOgrenci,
-  [
-    query("page").optional().isInt({ min: 1 }).toInt().withMessage("Page tamsayı ve 1'den büyük olmalı"),
-    query("limit").optional().isInt({ min: 1, max: 100 }).toInt().withMessage("Limit 1-100 arasında olmalı")
-  ],
-  async (req, res, next) => {
-    logger.debug("🔍 Öğrenci dersleri listeleme isteği alındı", { user_id: req.user?.id, page: req.query.page, limit: req.query.limit });
-
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      logger.warn("❌ Doğrulama hatası", { errors: errors.array(), user_id: req.user?.id });
-      return res.status(400).json({ hatalar: errors.array() });
-    }
-
-    const { page = 1, limit = 10 } = req.query;
-    const offset = (page - 1) * limit;
-
-    try {
-      if (!req.user || !req.user.id || !Number.isInteger(req.user.id)) {
-        logger.warn("⛔ Geçersiz kullanıcı bilgisi", { user_id: req.user?.id });
-        return res.status(401).json({ mesaj: "Geçersiz kullanıcı bilgisi" });
-      }
-
-      const query = `
-        SELECT 
-          d.*,
-          u.ad as ogretmen_ad,
-          u.soyad as ogretmen_soyad
-        FROM dersler d
-        JOIN ders_kayitlari dk ON d.id = dk.ders_id
-        LEFT JOIN kullanicilar u ON d.ogretmen_id = u.id
-        WHERE dk.ogrenci_id = $1
-        ORDER BY d.id ASC
-        LIMIT $2 OFFSET $3
-      `;
-      const countQuery = `
-        SELECT COUNT(*)
-        FROM dersler d
-        JOIN ders_kayitlari dk ON d.id = dk.ders_id
-        WHERE dk.ogrenci_id = $1
-      `;
-      const { rows } = await pool.query(query, [req.user.id, limit, offset]);
-      const { rows: countRows } = await pool.query(countQuery, [req.user.id]);
-
-      logger.info(`✅ ${rows.length} ders bulundu`, { user_id: req.user.id, total: countRows[0]?.count || 0, page, limit });
-      res.json({
-        data: rows,
-        total: countRows[0] ? parseInt(countRows[0].count || 0) : 0,
-        page: parseInt(page),
-        limit: parseInt(limit)
-      });
-    } catch (err) {
-      logger.error("❌ Öğrenci dersleri listeleme hatası", { error: err.message, stack: err.stack, user_id: req.user?.id });
-      next(err);
-    }
-  }
-);
 
 /**
  * @swagger

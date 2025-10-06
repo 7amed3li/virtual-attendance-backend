@@ -793,10 +793,6 @@ router.get(
     }
 );
 
-
-
-
-
 /**
  * @swagger
  * /api/reports/analytics-data:
@@ -1092,6 +1088,75 @@ router.put("/attendance", verifyToken, sadeceOgretmenVeAdmin, async (req, res, n
         }
     } catch (err) {
         logger.error(`❌ Manuel yoklama güncellenirken hata`, { error: err.message, body: req.body });
+        next(err);
+    }
+});
+
+/**
+ * @swagger
+ * /api/reports/attendance/session-select:
+ *   post:
+ *     summary: "Öğrencinin belirli bir oturumdaki katılmama durumunu katıldıya çevirir (Oturum Seç butonu için)"
+ *     tags: [Raporlar, Öğretmen]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               ogrenci_id: { type: integer }
+ *               oturum_id: { type: integer }
+ *               tur_no: { type: integer }
+ *     responses:
+ *       200:
+ *         description: "Öğrenci katıldı olarak işaretlendi."
+ *       400:
+ *         description: "Geçersiz istek."
+ *       500:
+ *         description: "Sunucu hatası."
+ */
+router.post("/attendance/session-select", verifyToken, sadeceOgretmenVeAdmin, async (req, res, next) => {
+    const { ogrenci_id, oturum_id, tur_no } = req.body;
+    logger.debug(`🔄 Oturum seç isteği: Öğrenci ${ogrenci_id}, Oturum ${oturum_id}, Tur ${tur_no}`);
+
+    try {
+        // Önce mevcut yoklama kaydını kontrol et
+        const existingAttendance = await pool.query(
+            'SELECT id, durum, tur_no FROM yoklamalar WHERE ogrenci_id = $1 AND oturum_id = $2 AND tur_no = $3',
+            [ogrenci_id, oturum_id, tur_no]
+        );
+
+        if (existingAttendance.rows.length > 0) {
+            // Mevcut kayıt varsa durumunu güncelle
+            const yoklamaId = existingAttendance.rows[0].id;
+            const { rows } = await pool.query(
+                'UPDATE yoklamalar SET durum = $1, zaman = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+                ['katildi', yoklamaId]
+            );
+            logger.info(`✅ Mevcut yoklama kaydı güncellendi: Öğrenci ${ogrenci_id}, Tur ${tur_no}`);
+            res.status(200).json({ 
+                mesaj: "Öğrenci katıldı olarak işaretlendi.", 
+                data: rows[0],
+                action: 'updated'
+            });
+        } else {
+            // Yeni kayıt oluştur
+            const { rows } = await pool.query(
+                'INSERT INTO yoklamalar (ogrenci_id, oturum_id, durum, zaman, tarama_tipi, tur_no) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4, $5) RETURNING *',
+                [ogrenci_id, oturum_id, 'katildi', 'manuel', tur_no]
+            );
+            logger.info(`✅ Yeni yoklama kaydı oluşturuldu: Öğrenci ${ogrenci_id}, Tur ${tur_no}`);
+            res.status(201).json({ 
+                mesaj: "Öğrenci için yeni katılım kaydı oluşturuldu.", 
+                data: rows[0],
+                action: 'created'
+            });
+        }
+    } catch (err) {
+        logger.error(`❌ Oturum seç işlemi hatası`, { error: err.message, body: req.body });
         next(err);
     }
 });
